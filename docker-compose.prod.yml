@@ -47,7 +47,6 @@ services:
     build:
       context: .
       dockerfile: api/Dockerfile
-    image: ${DOCKER_REGISTRY:-mentorship}/api:${API_TAG:-latest}
     restart: unless-stopped
     container_name: mentorship-api
     labels:
@@ -88,7 +87,6 @@ services:
     build:
       context: .
       dockerfile: bot/Dockerfile
-    image: ${DOCKER_REGISTRY:-mentorship}/bot:${BOT_TAG:-latest}
     restart: unless-stopped
     container_name: mentorship-bot
     labels:
@@ -117,7 +115,6 @@ services:
     build:
       context: ./nginx
       dockerfile: Dockerfile
-    image: ${DOCKER_REGISTRY:-mentorship}/nginx:${NGINX_TAG:-latest}
     restart: unless-stopped
     container_name: mentorship
     labels:
