@@ -1,17 +1,3 @@
-# Production docker-compose for Portainer deployment
-# Domain: mentorship.actiol.dev
-#
-# IMPORTANT: Use with Git repository source in Portainer
-# 1. In Portainer: Stacks → Add Stack → Repository
-# 2. Enter: https://github.com/Actiol/mentorship-helper.git
-# 3. Compose file: docker-compose.prod.yml
-# 4. Add environment variables in the UI
-#
-# Network Configuration:
-# - internal: Private network for service-to-service communication
-# - cloudflared_tunnel: External network (must exist, created by Cloudflare tunnel stack)
-#   Cloudflare tunnel accesses services on this network at: http://mentorship:80
-
 version: '3.8'
 
 services:
@@ -55,6 +41,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Automated migration step right before runtime execution
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-mentorship}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mentorship}
       OSU_CLIENT_ID: ${OSU_CLIENT_ID}
@@ -124,7 +112,8 @@ services:
       api:
         condition: service_healthy
     volumes:
-      - ./userscript:/srv/userscript:ro
+      # Maps the standalone userscript file directly inside the target directory path expected by Nginx
+      - ./mentorship.user.js:/srv/userscript/mentorship.user.js:ro
       - oszdata:/data/osz:ro
     networks:
       - internal
@@ -152,5 +141,3 @@ networks:
     driver: bridge
   cloudflared_tunnel:
     external: true
-
-

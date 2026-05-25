@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         osu! Mentorship Feedback
-// @namespace    https://mentorship.yourdomain.com
+// @namespace    https://mentorship.actiol.dev
 // @version      1.0.0
 // @description  Adds mentorship feedback panels to osu! beatmap discussion posts
 // @author       you
@@ -8,15 +8,15 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
-// @connect      mentorship.yourdomain.com
-// @updateURL    https://mentorship.yourdomain.com/install
-// @downloadURL  https://mentorship.yourdomain.com/install
+// @connect      mentorship.actiol.dev
+// @updateURL    https://mentorship.actiol.dev/install
+// @downloadURL  https://mentorship.actiol.dev/install
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const API          = 'https://mentorship.yourdomain.com';
+    const API          = 'https://mentorship.actiol.dev';
     const INJECTED     = 'data-ms-injected';
 
     // ── Auth ──────────────────────────────────────────────────────────────────
@@ -71,9 +71,6 @@
         return m ? parseInt(m[1]) : null;
     }
 
-    // osu! new web stores the discussion post id in the element id or nearby anchors.
-    // These selectors target the current osu-web React output — verify against live DOM
-    // if something breaks after an osu! site update.
     function getPostId(el) {
         if (el.dataset.id)      return parseInt(el.dataset.id);
         if (el.dataset.postId)  return parseInt(el.dataset.postId);
@@ -167,7 +164,6 @@
             return panel;
         }
 
-        // Header + collapsible body
         const header = document.createElement('div');
         header.className = 'ms-header';
         header.innerHTML = `<span class="ms-label">🎓 Mentorship Feedback</span><span class="ms-chevron">▼</span>`;
@@ -179,9 +175,7 @@
             const open = body.classList.toggle('open');
             header.querySelector('.ms-chevron').textContent = open ? '▲' : '▼';
             if (open && !body.dataset.loaded) {
-                const m = myMentorships.length === 1
-                    ? myMentorships[0]
-                    : null; // picker rendered inside
+                const m = myMentorships.length === 1 ? myMentorships[0] : null;
                 loadBody(body, postId, beatmapsetId, m);
                 body.dataset.loaded = '1';
             }
@@ -195,7 +189,6 @@
     async function loadBody(body, postId, beatmapsetId, mentorship) {
         body.innerHTML = '<span class="ms-empty">Loading…</span>';
 
-        // Multiple mentorships — show a picker and re-load on change
         if (!mentorship) {
             const sel = document.createElement('select');
             sel.className = 'ms-mentorship-select';
@@ -246,7 +239,6 @@
         const isLead   = mentorship.my_role === 'lead_mentor';
         const isMentee = mentorship.my_role === 'mentee';
 
-        // ── .osz row ──────────────────────────────────────────────────────────
         const oszRow = document.createElement('div');
         oszRow.className = 'ms-osz-row';
         if (oszInfo) {
@@ -260,7 +252,6 @@
         }
         container.appendChild(oszRow);
 
-        // ── Discussed status bar ──────────────────────────────────────────────
         const statusBar = document.createElement('div');
         statusBar.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;';
 
@@ -289,7 +280,6 @@
         }
         container.appendChild(statusBar);
 
-        // ── Limited visibility notice ─────────────────────────────────────────
         if (isMentee && !status.is_discussed) {
             const n = document.createElement('div');
             n.className   = 'ms-notice';
@@ -297,7 +287,6 @@
             container.appendChild(n);
         }
 
-        // ── Feedback list ─────────────────────────────────────────────────────
         if (feedback.length === 0) {
             const e = document.createElement('div');
             e.className   = 'ms-empty';
@@ -317,7 +306,6 @@
             });
         }
 
-        // ── Submit form ───────────────────────────────────────────────────────
         const form     = document.createElement('div');
         form.className = 'ms-form';
 
@@ -389,7 +377,6 @@
 
         const panel = buildPanel(el, postId);
 
-        // Try to inject after the message body; fall back to appending to the post
         const target = el.querySelector('.beatmap-discussion-post__message') || el;
         if (target.insertAdjacentElement) {
             target.insertAdjacentElement('afterend', panel);
@@ -420,18 +407,16 @@
         scan();
     }
 
-    // MutationObserver for dynamically rendered posts (osu! is a React SPA)
     const observer = new MutationObserver(scan);
     observer.observe(document.body, { childList: true, subtree: true });
 
-    // Also re-init on SPA navigation (title element changes when route changes)
     let lastPath = location.pathname;
     new MutationObserver(() => {
         if (location.pathname !== lastPath) {
             lastPath = location.pathname;
             if (location.pathname.match(/\/beatmapsets\/\d+\/discussion/)) {
                 myMentorships = [];
-                setTimeout(init, 600); // give React time to render the page
+                setTimeout(init, 600);
             }
         }
     }).observe(document.querySelector('title') || document.head, {
