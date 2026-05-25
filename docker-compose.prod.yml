@@ -124,6 +124,7 @@ services:
       api:
         condition: service_healthy
     volumes:
+      - ./userscript:/srv/userscript:ro
       - oszdata:/data/osz:ro
     networks:
       - internal
