@@ -128,11 +128,22 @@ Once deployed, verify everything is working:
 
 ### Step 6: Cloudflare Tunnel Integration
 
-If using Cloudflare tunnel, configure it to point to your internal mentorship service:
+The stack is configured to work with Cloudflare tunnel via an external network (like your zipline setup).
 
-**In Cloudflare Tunnel Config:**
-- **Service:** `http://mentorship-api:8000` or `http://nginx` (depends on your setup)
-- **Network:** Stack name will be `mentorship` (Portainer auto-prefixes network names)
+**Prerequisites:**
+- Cloudflare tunnel stack must be running first
+- Create external network in Portainer: **Stacks** → cloudflared tunnel → check it's deployed
+- External network name: `cloudflared_tunnel`
+
+**Cloudflare Tunnel Configuration:**
+- **Service URL:** `http://mentorship:80`
+- **Network:** Automatically connects via `cloudflared_tunnel` external network
+
+No port exposure needed—tunnel reaches the nginx container (named `mentorship`) internally.
+
+**Network Configuration:**
+- `internal` - Private bridge for db, api, bot communication
+- `cloudflared_tunnel` - External network for tunnel access (must exist before deploying mentorship stack)
 
 ---
 

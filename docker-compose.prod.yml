@@ -6,6 +6,11 @@
 # 2. Enter: https://github.com/Actiol/mentorship-helper.git
 # 3. Compose file: docker-compose.prod.yml
 # 4. Add environment variables in the UI
+#
+# Network Configuration:
+# - internal: Private network for service-to-service communication
+# - cloudflared_tunnel: External network (must exist, created by Cloudflare tunnel stack)
+#   Cloudflare tunnel accesses services on this network at: http://mentorship:80
 
 version: '3.8'
 
@@ -25,7 +30,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      - mentorship
+      - internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mentorship} -d ${POSTGRES_DB:-mentorship}"]
       interval: 10s
@@ -64,7 +69,7 @@ services:
     volumes:
       - oszdata:/data/osz
     networks:
-      - mentorship
+      - internal
     expose:
       - "8000"
     healthcheck:
@@ -101,7 +106,7 @@ services:
       API_BOT_SECRET: ${API_BOT_SECRET}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     networks:
-      - mentorship
+      - internal
     logging:
       driver: json-file
       options:
@@ -114,21 +119,19 @@ services:
       dockerfile: Dockerfile
     image: ${DOCKER_REGISTRY:-mentorship}/nginx:${NGINX_TAG:-latest}
     restart: unless-stopped
-    container_name: mentorship-nginx
+    container_name: mentorship
     labels:
       com.mentorship.description: "Nginx reverse proxy and SSL termination"
       com.mentorship.component: "web"
     depends_on:
       api:
         condition: service_healthy
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./nginx/certs:/etc/nginx/certs:ro
       - oszdata:/data/osz:ro
     networks:
-      - mentorship
+      - internal
+      - cloudflared_tunnel
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
       interval: 30s
@@ -148,6 +151,9 @@ volumes:
     driver: local
 
 networks:
-  mentorship:
+  internal:
     driver: bridge
+  cloudflared_tunnel:
+    external: true
+
 
