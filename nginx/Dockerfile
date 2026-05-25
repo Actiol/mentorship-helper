@@ -2,8 +2,8 @@ FROM nginx:1.27-alpine
 
 RUN apk add --no-cache curl
 
-# Copy the userscript into the image
-COPY ../userscript/mentorship.user.js /srv/userscript/mentorship.user.js
+# Create the target directory and copy the userscript from the build context
+COPY userscript/mentorship.user.js /srv/userscript/mentorship.user.js
 
 COPY nginx.conf /etc/nginx/nginx.conf
 
