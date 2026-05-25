@@ -1,10 +1,11 @@
 # Production docker-compose for Portainer deployment
 # Domain: mentorship.actiol.dev
-# 
-# Usage:
-#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-# 
-# Or in Portainer: upload this as the stack file
+#
+# IMPORTANT: Use with Git repository source in Portainer
+# 1. In Portainer: Stacks → Add Stack → Repository
+# 2. Enter: https://github.com/Actiol/mentorship-helper.git
+# 3. Compose file: docker-compose.prod.yml
+# 4. Add environment variables in the UI
 
 version: '3.8'
 
@@ -18,7 +19,7 @@ services:
       com.mentorship.version: "16"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-mentorship}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?error: POSTGRES_PASSWORD not set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-mentorship}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
@@ -32,7 +33,7 @@ services:
       retries: 5
       start_period: 10s
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
@@ -41,8 +42,6 @@ services:
     build:
       context: .
       dockerfile: api/Dockerfile
-      args:
-        BUILDKIT_INLINE_CACHE: 1
     image: ${DOCKER_REGISTRY:-mentorship}/api:${API_TAG:-latest}
     restart: always
     container_name: mentorship-api
@@ -53,13 +52,13 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-mentorship}:${POSTGRES_PASSWORD:?error: POSTGRES_PASSWORD not set}@db:5432/${POSTGRES_DB:-mentorship}
-      OSU_CLIENT_ID: ${OSU_CLIENT_ID:?error: OSU_CLIENT_ID not set}
-      OSU_CLIENT_SECRET: ${OSU_CLIENT_SECRET:?error: OSU_CLIENT_SECRET not set}
-      JWT_SECRET: ${JWT_SECRET:?error: JWT_SECRET not set}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mentorship}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mentorship}
+      OSU_CLIENT_ID: ${OSU_CLIENT_ID}
+      OSU_CLIENT_SECRET: ${OSU_CLIENT_SECRET}
+      JWT_SECRET: ${JWT_SECRET}
       BASE_URL: ${BASE_URL:-https://mentorship.actiol.dev}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://osu.ppy.sh}
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:?error: DISCORD_BOT_TOKEN not set}
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
       OSZ_STORAGE_DIR: /data/osz
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
@@ -75,7 +74,7 @@ services:
       retries: 3
       start_period: 30s
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
@@ -84,8 +83,6 @@ services:
     build:
       context: .
       dockerfile: bot/Dockerfile
-      args:
-        BUILDKIT_INLINE_CACHE: 1
     image: ${DOCKER_REGISTRY:-mentorship}/bot:${BOT_TAG:-latest}
     restart: always
     container_name: mentorship-bot
@@ -96,17 +93,17 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-mentorship}:${POSTGRES_PASSWORD:?error: POSTGRES_PASSWORD not set}@db:5432/${POSTGRES_DB:-mentorship}
-      DISCORD_TOKEN: ${DISCORD_TOKEN:?error: DISCORD_TOKEN not set}
-      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:?error: DISCORD_CLIENT_ID not set}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mentorship}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mentorship}
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
       OSU_VERIFY_BASE_URL: ${OSU_VERIFY_BASE_URL:-https://mentorship.actiol.dev/auth/discord-verify}
       API_BASE_URL: ${API_BASE_URL:-https://mentorship.actiol.dev}
-      API_BOT_SECRET: ${API_BOT_SECRET:?error: API_BOT_SECRET not set}
+      API_BOT_SECRET: ${API_BOT_SECRET}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     networks:
       - mentorship
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
@@ -134,8 +131,6 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     networks:
       - mentorship
-    environment:
-      SERVER_NAME: ${SERVER_NAME:-mentorship.actiol.dev}
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
       interval: 30s
@@ -143,7 +138,7 @@ services:
       retries: 3
       start_period: 10s
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "50m"
         max-file: "5"
@@ -157,3 +152,4 @@ volumes:
 networks:
   mentorship:
     driver: bridge
+
