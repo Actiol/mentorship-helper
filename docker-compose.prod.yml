@@ -113,7 +113,7 @@ services:
         condition: service_healthy
     volumes:
       # Maps the standalone userscript file directly inside the target directory path expected by Nginx
-      - ./userscript/mentorship.user.js:/srv/userscript/mentorship.user.js:ro
+      #- ./userscript/mentorship.user.js:/srv/userscript/mentorship.user.js:ro
       - oszdata:/data/osz:ro
     networks:
       - internal
