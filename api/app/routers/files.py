@@ -21,7 +21,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy.orm import Column, Integer, String, DateTime, Enum as SAEnum
+from sqlalchemy import Column, Integer, String, DateTime, Enum as SAEnum
 from sqlalchemy.orm import Session
 
 from shared.database import get_db

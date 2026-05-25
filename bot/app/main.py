@@ -8,9 +8,10 @@ from .config import settings
 class MentorshipBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members  = True
-        intents.messages = True
-        intents.message_content = True  # needed for the .osz attachment wait_for
+        intents.members = True
+        intents.message_content = True
+        intents.guilds = True
+        intents.guild_messages = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):

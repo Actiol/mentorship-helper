@@ -107,6 +107,10 @@ OSU_CLIENT_ID=<your_osu_id>
 OSU_CLIENT_SECRET=<your_osu_secret>
 
 # Discord Bot (create at https://discord.com/developers/applications)
+# ⚠️ IMPORTANT: Enable these intents in Discord Developer Portal:
+#    - Server Members Intent
+#    - Message Content Intent
+#    - Guild Messages
 DISCORD_BOT_TOKEN=<your_bot_token>
 DISCORD_TOKEN=<same_as_above>
 DISCORD_CLIENT_ID=<your_app_id>
@@ -160,11 +164,18 @@ chmod 644 nginx/certs/*
 
 #### 2. Create Stack in Portainer
 
+**Important:** Use **Git Repository** method (not Web Editor paste):
+
 1. Open Portainer dashboard
 2. Navigate to **Stacks** → **Add Stack**
-3. Choose upload method:
-   - **Web Editor**: Paste content of `docker-compose.prod.yml`
-   - **Git**: `https://github.com/Actiol/mentorship-helper.git`
+3. Select **Repository**
+4. Enter:
+   - **Repository URL:** `https://github.com/Actiol/mentorship-helper.git`
+   - **Repository Reference:** `main`
+   - **Compose file:** `docker-compose.prod.yml`
+5. Click **Next**
+
+**Why Git Repository?** Portainer clones your repo and has access to all files (Dockerfiles, nginx.conf, shared/ code). This is required for building images.
 
 #### 3. Configure Environment Variables
 
@@ -318,6 +329,32 @@ Logs are color-coded and structured for easy parsing:
 ---
 
 ## 🐛 Troubleshooting
+
+### Discord Bot: PrivilegedIntentsRequired
+
+**Error:** `discord.errors.PrivilegedIntentsRequired: Shard ID None is requesting privileged intents`
+
+**Fix:**
+1. Go to https://discord.com/developers/applications
+2. Select your application
+3. Click **Bot** → **Intents**
+4. Enable these intents:
+   - ✅ Server Members Intent
+   - ✅ Message Content Intent
+5. Save and restart the bot
+
+**Why?** Discord requires explicit intent declarations for privileged operations (reading messages, accessing member lists).
+
+### API: SQLAlchemy Import Error
+
+**Error:** `ImportError: cannot import name 'Column' from 'sqlalchemy.orm'`
+
+**Fix:** Already included—`Column` imports from `sqlalchemy` (not `sqlalchemy.orm` in SQLAlchemy 2.0+).
+
+If this persists, rebuild the API image:
+```bash
+docker-compose build --no-cache api
+```
 
 ### Service Won't Start
 
