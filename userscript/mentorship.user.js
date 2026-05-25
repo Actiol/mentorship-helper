@@ -9,8 +9,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @connect      mentorship.actiol.dev
-// @updateURL    https://mentorship.actiol.dev/install
-// @downloadURL  https://mentorship.actiol.dev/install
+// @updateURL    https://mentorship.actiol.dev/mentorship.user.js
+// @downloadURL  https://mentorship.actiol.dev/mentorship.user.js
 // ==/UserScript==
 
 (function () {
