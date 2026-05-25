@@ -127,7 +127,6 @@ services:
       api:
         condition: service_healthy
     volumes:
-      - ./nginx/certs:/etc/nginx/certs:ro
       - oszdata:/data/osz:ro
     networks:
       - internal
