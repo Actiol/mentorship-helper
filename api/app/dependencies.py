@@ -1,12 +1,18 @@
-from fastapi import Depends, HTTPException, status
+from typing import Optional
+
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from shared.database import get_db
 from shared.models import MentorshipMember, UserRole
 from .auth import decode_jwt
+from .config import settings
 
-bearer = HTTPBearer()
+# ── JWT bearer (required) ──────────────────────────────────────────────────────
+
+bearer          = HTTPBearer()
+optional_bearer = HTTPBearer(auto_error=False)
 
 
 class CurrentUser:
@@ -29,6 +35,35 @@ def get_current_user(
         osu_username=payload["username"],
     )
 
+
+# ── Bot-secret or JWT (for endpoints the Discord bot calls) ───────────────────
+
+def get_current_user_or_bot(
+    x_bot_secret: Optional[str] = Header(None),
+    credentials:  Optional[HTTPAuthorizationCredentials] = Depends(optional_bearer),
+) -> Optional[CurrentUser]:
+    """
+    Returns a CurrentUser if a valid JWT is present, None if a valid bot secret
+    is present, or raises 401 otherwise.
+    Bot callers must supply the uploader's osu_user_id as a separate form field.
+    """
+    if x_bot_secret:
+        if x_bot_secret == settings.api_bot_secret:
+            return None  # caller is the bot; uploader identity comes from form data
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bot secret")
+
+    if credentials:
+        payload = decode_jwt(credentials.credentials)
+        if payload:
+            return CurrentUser(
+                osu_user_id=int(payload["sub"]),
+                osu_username=payload["username"],
+            )
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+
+# ── Membership helpers ─────────────────────────────────────────────────────────
 
 def _get_member(db: Session, mentorship_id: int, osu_user_id: int) -> MentorshipMember:
     member = (

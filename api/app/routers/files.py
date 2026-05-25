@@ -11,22 +11,23 @@ actual file serving via X-Accel-Redirect — no direct public access to the file
 
 import enum
 import os
-import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header
 from fastapi.responses import Response
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy import Column, Integer, String, DateTime, Enum as SAEnum
 from sqlalchemy.orm import Session
 
 from shared.database import get_db
 from shared.models import Base, MentorshipMember
-from ..dependencies import get_current_user, CurrentUser
+from ..dependencies import get_current_user, get_current_user_or_bot, optional_bearer, CurrentUser
+from ..config import settings
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -116,18 +117,36 @@ def _replace_existing(db: Session, mentorship_id: int, beatmapset_id: int) -> No
         db.flush()
 
 
+def _resolve_actor_osu_id(
+    current_user: Optional[CurrentUser],
+    uploader_osu_id: Optional[int],
+) -> int:
+    """
+    Returns the osu! user ID of the uploader.
+    - JWT auth  → use current_user.osu_user_id (uploader_osu_id is ignored)
+    - Bot auth  → use uploader_osu_id from form data (must be provided)
+    """
+    if current_user is not None:
+        return current_user.osu_user_id
+    if uploader_osu_id is None:
+        raise HTTPException(status_code=400, detail="Bot uploads must include uploader_osu_id")
+    return uploader_osu_id
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @router.post("/beatmapset", response_model=FileOut)
 async def upload_osz(
-    mentorship_id: int          = Form(...),
-    beatmapset_id: int          = Form(...),
-    file:          UploadFile   = File(...),
-    current_user:  CurrentUser  = Depends(get_current_user),
-    db:            Session      = Depends(get_db),
+    mentorship_id:   int                                     = Form(...),
+    beatmapset_id:   int                                     = Form(...),
+    uploader_osu_id: Optional[int]                           = Form(None),
+    file:            UploadFile                              = File(...),
+    current_user:    Optional[CurrentUser]                   = Depends(get_current_user_or_bot),
+    db:              Session                                 = Depends(get_db),
 ):
-    """Direct multipart upload (used by the web UI or bot via HTTP)."""
-    _require_member(db, mentorship_id, current_user.osu_user_id)
+    """Direct multipart upload (used by the web UI or Discord bot via HTTP)."""
+    actor_osu_id = _resolve_actor_osu_id(current_user, uploader_osu_id)
+    _require_member(db, mentorship_id, actor_osu_id)
 
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
@@ -142,7 +161,7 @@ async def upload_osz(
         filename=file.filename or f"{beatmapset_id}.osz",
         file_path=stored_name,
         file_size_bytes=len(data),
-        uploaded_by_osu_id=current_user.osu_user_id,
+        uploaded_by_osu_id=actor_osu_id,
         source=FileSource.discord_upload,
     )
     db.add(record)
@@ -153,14 +172,16 @@ async def upload_osz(
 
 @router.post("/beatmapset/from-url", response_model=FileOut)
 async def upload_osz_from_url(
-    mentorship_id: int         = Form(...),
-    beatmapset_id: int         = Form(...),
-    url:           str         = Form(...),
-    current_user:  CurrentUser = Depends(get_current_user),
-    db:            Session     = Depends(get_db),
+    mentorship_id:   int                   = Form(...),
+    beatmapset_id:   int                   = Form(...),
+    url:             str                   = Form(...),
+    uploader_osu_id: Optional[int]         = Form(None),
+    current_user:    Optional[CurrentUser] = Depends(get_current_user_or_bot),
+    db:              Session               = Depends(get_db),
 ):
     """Fetch an .osz from a URL and store it. Fallback when the file exceeds Discord's limit."""
-    _require_member(db, mentorship_id, current_user.osu_user_id)
+    actor_osu_id = _resolve_actor_osu_id(current_user, uploader_osu_id)
+    _require_member(db, mentorship_id, actor_osu_id)
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
         try:
@@ -186,7 +207,7 @@ async def upload_osz_from_url(
         filename=original_filename,
         file_path=stored_name,
         file_size_bytes=len(data),
-        uploaded_by_osu_id=current_user.osu_user_id,
+        uploaded_by_osu_id=actor_osu_id,
         source=FileSource.url,
     )
     db.add(record)

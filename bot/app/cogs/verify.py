@@ -9,6 +9,22 @@ from shared.models import UserIdentity, OAuthState, OAuthFlow
 from ..config import settings
 
 
+class VerifyView(discord.ui.View):
+    """A persistent-style view that renders a single link button for osu! OAuth."""
+
+    def __init__(self, url: str):
+        # timeout=None keeps the button alive in the ephemeral message without issues
+        super().__init__(timeout=None)
+        self.add_item(
+            discord.ui.Button(
+                label="Verify with osu!",
+                url=url,
+                style=discord.ButtonStyle.link,
+                emoji="🔗",
+            )
+        )
+
+
 class VerifyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -25,7 +41,7 @@ class VerifyCog(commands.Cog):
             if existing:
                 await interaction.response.send_message(
                     f"✅ You're already verified as **{existing.osu_username}** (#{existing.osu_user_id}).\n"
-                    "To re-link a different account, ask a lead mentor to unlink you first.",
+                    "To re-link a different account, ask an admin to run `/unlink` for you.",
                     ephemeral=True,
                 )
                 return
@@ -40,9 +56,9 @@ class VerifyCog(commands.Cog):
 
             url = f"{settings.osu_verify_base_url}?state={state}"
             await interaction.response.send_message(
-                f"Click the link below to verify your osu! account.\n"
-                f"⏳ **This link expires in 10 minutes.**\n\n"
-                f"{url}",
+                "Click the button below to verify your osu! account.\n"
+                "⏳ **This link expires in 10 minutes.**",
+                view=VerifyView(url),
                 ephemeral=True,
             )
         finally:
@@ -64,9 +80,10 @@ class VerifyCog(commands.Cog):
                     ephemeral=True,
                 )
             else:
+                ts = int(identity.verified_at.timestamp()) if identity.verified_at else 0
                 await interaction.response.send_message(
                     f"{user.mention} → **{identity.osu_username}** (#{identity.osu_user_id})\n"
-                    f"Verified: <t:{int(identity.verified_at.timestamp())}:R>",
+                    f"Verified: <t:{ts}:R>",
                     ephemeral=True,
                 )
         finally:

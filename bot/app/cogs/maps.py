@@ -2,25 +2,62 @@
 /submit_map — mentees submit their pre-modded .osz file so mentors can reference it.
 
 Two paths:
-  /submit_map mentorship_id beatmapset_id            (then attach the .osz file to the message)
-  /submit_map mentorship_id beatmapset_id url:<link> (bot fetches the file from the URL instead)
+  /submit_map mentorship_name beatmapset_id            (then attach the .osz file to the message)
+  /submit_map mentorship_name beatmapset_id url:<link> (bot fetches the file from the URL instead)
 
 The bot downloads the file from Discord's CDN (which expires) and POSTs it to the API,
 which stores it permanently in the Docker volume.
 """
 
 import io
+from typing import List
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 import httpx
 
 from shared.database import SessionLocal
-from shared.models import UserIdentity, MentorshipMember
+from shared.models import UserIdentity, MentorshipMember, Mentorship
 from ..config import settings
 
 DISCORD_MAX_BYTES = 25 * 1024 * 1024  # 25 MB — Discord's attachment limit
 
+
+# ── Autocomplete ───────────────────────────────────────────────────────────────
+
+async def _member_mentorship_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    """Returns mentorship names in this server where the invoker is a member."""
+    db = SessionLocal()
+    try:
+        identity = (
+            db.query(UserIdentity)
+            .filter(UserIdentity.discord_id == str(interaction.user.id))
+            .first()
+        )
+        if not identity:
+            return []
+        rows = (
+            db.query(Mentorship)
+            .join(MentorshipMember, MentorshipMember.mentorship_id == Mentorship.id)
+            .filter(
+                Mentorship.discord_guild_id  == str(interaction.guild_id),
+                MentorshipMember.osu_user_id == identity.osu_user_id,
+                Mentorship.name.ilike(f"%{current}%"),
+            )
+            .order_by(Mentorship.name)
+            .limit(25)
+            .all()
+        )
+        return [app_commands.Choice(name=row.name, value=row.name) for row in rows]
+    finally:
+        db.close()
+
+
+# ── Cog ────────────────────────────────────────────────────────────────────────
 
 class MapsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -31,14 +68,15 @@ class MapsCog(commands.Cog):
         description="Submit the .osz file for a beatmapset you're being mentored on",
     )
     @app_commands.describe(
-        mentorship_id="Mentorship ID (from /mentorship list)",
+        mentorship_name="Mentorship name (type to search)",
         beatmapset_id="osu! beatmapset ID (the number in the URL)",
         url="Optional: direct download URL if the file is too large to attach (e.g. catbox.moe link)",
     )
+    @app_commands.autocomplete(mentorship_name=_member_mentorship_autocomplete)
     async def submit_map(
         self,
         interaction: discord.Interaction,
-        mentorship_id: int,
+        mentorship_name: str,
         beatmapset_id: int,
         url: str = None,
     ):
@@ -56,9 +94,24 @@ class MapsCog(commands.Cog):
                 )
                 return
 
+            # Resolve mentorship by name
+            mentorship = (
+                db.query(Mentorship)
+                .filter(
+                    Mentorship.discord_guild_id == str(interaction.guild_id),
+                    Mentorship.name             == mentorship_name,
+                )
+                .first()
+            )
+            if not mentorship:
+                await interaction.followup.send(
+                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                )
+                return
+
             # Verify they're a member of this mentorship
             member = db.query(MentorshipMember).filter(
-                MentorshipMember.mentorship_id == mentorship_id,
+                MentorshipMember.mentorship_id == mentorship.id,
                 MentorshipMember.osu_user_id   == identity.osu_user_id,
             ).first()
             if not member:
@@ -66,20 +119,18 @@ class MapsCog(commands.Cog):
                     "You're not a member of that mentorship.", ephemeral=True
                 )
                 return
+
+            uploader_osu_id = identity.osu_user_id
+            mentorship_id   = mentorship.id
         finally:
             db.close()
 
         # ── Path 1: URL provided ───────────────────────────────────────────────
         if url:
-            await self._submit_from_url(interaction, identity, mentorship_id, beatmapset_id, url)
+            await self._submit_from_url(interaction, uploader_osu_id, mentorship_id, beatmapset_id, url)
             return
 
         # ── Path 2: Attachment expected ────────────────────────────────────────
-        # Discord slash commands don't support file attachments directly in the
-        # command parameters, so we prompt the user to reply/follow up with the file.
-        # The common pattern is to use a follow-up message that waits for the next
-        # attachment from this user in this channel.
-
         await interaction.followup.send(
             f"📎 Please send your `.osz` file as an attachment in this channel within **60 seconds**.\n"
             f"_(Max size: 25 MB. Larger files: re-run the command with the `url` parameter.)_",
@@ -88,7 +139,7 @@ class MapsCog(commands.Cog):
 
         def check(msg: discord.Message):
             return (
-                msg.author.id   == interaction.user.id
+                msg.author.id    == interaction.user.id
                 and msg.channel.id == interaction.channel_id
                 and len(msg.attachments) > 0
             )
@@ -122,14 +173,14 @@ class MapsCog(commands.Cog):
             return
 
         await self._post_to_api(
-            interaction, identity, mentorship_id, beatmapset_id,
+            interaction, uploader_osu_id, mentorship_id, beatmapset_id,
             file_bytes=file_bytes,
             filename=attachment.filename,
         )
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
-    async def _submit_from_url(self, interaction, identity, mentorship_id, beatmapset_id, url):
+    async def _submit_from_url(self, interaction, uploader_osu_id, mentorship_id, beatmapset_id, url):
         """Have the API fetch the file from the URL (avoids Discord size limit)."""
         api_url = f"{settings.api_base_url}/files/beatmapset/from-url"
         try:
@@ -137,14 +188,15 @@ class MapsCog(commands.Cog):
                 resp = await client.post(
                     api_url,
                     data={
-                        "mentorship_id": mentorship_id,
-                        "beatmapset_id": beatmapset_id,
-                        "url":           url,
+                        "mentorship_id":   str(mentorship_id),
+                        "beatmapset_id":   str(beatmapset_id),
+                        "url":             url,
+                        "uploader_osu_id": str(uploader_osu_id),
                     },
                     headers={"X-Bot-Secret": settings.api_bot_secret},
                 )
                 if resp.status_code == 200:
-                    info = resp.json()
+                    info    = resp.json()
                     size_mb = info["file_size_bytes"] / 1024 / 1024
                     await interaction.followup.send(
                         f"✅ Submitted **{info['filename']}** ({size_mb:.1f} MB) "
@@ -158,7 +210,7 @@ class MapsCog(commands.Cog):
         except httpx.HTTPError as e:
             await interaction.followup.send(f"❌ Failed to reach API: {e}", ephemeral=True)
 
-    async def _post_to_api(self, interaction, identity, mentorship_id, beatmapset_id, file_bytes, filename):
+    async def _post_to_api(self, interaction, uploader_osu_id, mentorship_id, beatmapset_id, file_bytes, filename):
         """Upload the already-downloaded bytes to the API."""
         api_url = f"{settings.api_base_url}/files/beatmapset"
         try:
@@ -166,8 +218,9 @@ class MapsCog(commands.Cog):
                 resp = await client.post(
                     api_url,
                     data={
-                        "mentorship_id": str(mentorship_id),
-                        "beatmapset_id": str(beatmapset_id),
+                        "mentorship_id":   str(mentorship_id),
+                        "beatmapset_id":   str(beatmapset_id),
+                        "uploader_osu_id": str(uploader_osu_id),
                     },
                     files={"file": (filename, io.BytesIO(file_bytes), "application/octet-stream")},
                     headers={"X-Bot-Secret": settings.api_bot_secret},

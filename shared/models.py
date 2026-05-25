@@ -55,10 +55,11 @@ class Mentorship(Base):
     """A mentorship group, scoped to one Discord guild."""
     __tablename__ = "mentorships"
 
-    id               = Column(Integer, primary_key=True, autoincrement=True)
-    name             = Column(String, nullable=False)
-    discord_guild_id = Column(String, nullable=False, index=True)
-    created_at       = Column(DateTime, default=datetime.utcnow, nullable=False)
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    name               = Column(String, nullable=False)
+    discord_guild_id   = Column(String, nullable=False, index=True)
+    creator_discord_id = Column(String, nullable=True)   # set at creation; used for permission checks
+    created_at         = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     members     = relationship("MentorshipMember",  back_populates="mentorship", cascade="all, delete-orphan")
     discussions = relationship("BeatmapDiscussion", back_populates="mentorship", cascade="all, delete-orphan")

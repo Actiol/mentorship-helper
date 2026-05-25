@@ -21,7 +21,8 @@ STATE_TTL_SECONDS = 600  # 10 minutes
 
 
 def _callback_url() -> str:
-    return f"{settings.base_url}/auth/callback"
+    # MUST match the "Application Callback URL" registered in your osu! OAuth app.
+    return f"{settings.base_url}/auth/osu-callback"
 
 
 def _osu_redirect(state_value: str) -> RedirectResponse:
@@ -73,7 +74,7 @@ async def userscript_login_start(db: Session = Depends(get_db)):
 
 # ── Shared callback ────────────────────────────────────────────────────────────
 
-@router.get("/callback")
+@router.get("/osu-callback")
 async def oauth_callback(
     code:  str = Query(...),
     state: str = Query(...),
@@ -132,18 +133,20 @@ async def oauth_callback(
                 status_code=409,
             )
 
+        now = datetime.utcnow()
         identity = db.query(UserIdentity).filter(UserIdentity.discord_id == row.discord_id).first()
         if not identity:
             identity = UserIdentity(
                 discord_id=row.discord_id,
                 osu_user_id=osu_user_id,
                 osu_username=osu_username,
+                verified_at=now,
             )
             db.add(identity)
         else:
             identity.osu_user_id  = osu_user_id
             identity.osu_username = osu_username
-            identity.verified_at  = datetime.utcnow()
+            identity.verified_at  = now
 
         discord_id = row.discord_id
         db.delete(row)

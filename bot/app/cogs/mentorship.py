@@ -1,3 +1,19 @@
+"""
+Mentorship management commands.
+
+Permission model:
+  - /mentorship create  → any verified user (they become the first lead mentor automatically)
+  - /mentorship add     → lead mentors may add mentees/mentors; only the creator may add lead mentors
+  - /mentorship remove  → lead mentors may remove mentees/mentors; only the creator may remove lead mentors
+  - /mentorship delete  → server administrators only
+  - /mentorship list    → anyone
+  - /mentorship members → anyone
+
+Mentorship names are used throughout (autocomplete replaces raw IDs).
+"""
+
+from typing import List
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -13,6 +29,102 @@ _ROLE_LABELS = {
 }
 
 
+# ── DB helpers ─────────────────────────────────────────────────────────────────
+
+def _get_identity(db: Session, discord_id: str) -> UserIdentity | None:
+    return db.query(UserIdentity).filter(UserIdentity.discord_id == discord_id).first()
+
+
+def _get_mentorship_by_name(db: Session, guild_id: str, name: str) -> Mentorship | None:
+    return db.query(Mentorship).filter(
+        Mentorship.discord_guild_id == guild_id,
+        Mentorship.name             == name,
+    ).first()
+
+
+def _get_member_entry(db: Session, mentorship_id: int, osu_user_id: int) -> MentorshipMember | None:
+    return db.query(MentorshipMember).filter(
+        MentorshipMember.mentorship_id == mentorship_id,
+        MentorshipMember.osu_user_id   == osu_user_id,
+    ).first()
+
+
+def _is_lead_mentor(db: Session, mentorship_id: int, discord_id: str) -> bool:
+    identity = _get_identity(db, discord_id)
+    if not identity:
+        return False
+    entry = _get_member_entry(db, mentorship_id, identity.osu_user_id)
+    return entry is not None and entry.role == UserRole.lead_mentor
+
+
+def _is_creator(mentorship: Mentorship, discord_id: str) -> bool:
+    """
+    True if this Discord user created the mentorship.
+    Falls back to True for legacy rows where creator_discord_id is NULL
+    (any lead mentor can act as creator on those).
+    """
+    if mentorship.creator_discord_id is None:
+        return True  # legacy: no creator recorded, defer to lead-mentor check
+    return mentorship.creator_discord_id == discord_id
+
+
+# ── Autocomplete ───────────────────────────────────────────────────────────────
+
+async def _mentorship_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    """Returns up to 25 mentorship names in this server matching what the user typed."""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Mentorship)
+            .filter(
+                Mentorship.discord_guild_id == str(interaction.guild_id),
+                Mentorship.name.ilike(f"%{current}%"),
+            )
+            .order_by(Mentorship.name)
+            .limit(25)
+            .all()
+        )
+        return [app_commands.Choice(name=row.name, value=row.name) for row in rows]
+    finally:
+        db.close()
+
+
+async def _my_mentorships_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    """
+    Returns mentorships in this server where the invoker is a lead mentor.
+    Used for commands that require lead-mentor permissions.
+    """
+    db = SessionLocal()
+    try:
+        identity = _get_identity(db, str(interaction.user.id))
+        if not identity:
+            return []
+        rows = (
+            db.query(Mentorship)
+            .join(MentorshipMember, MentorshipMember.mentorship_id == Mentorship.id)
+            .filter(
+                Mentorship.discord_guild_id      == str(interaction.guild_id),
+                MentorshipMember.osu_user_id     == identity.osu_user_id,
+                MentorshipMember.role            == UserRole.lead_mentor,
+                Mentorship.name.ilike(f"%{current}%"),
+            )
+            .order_by(Mentorship.name)
+            .limit(25)
+            .all()
+        )
+        return [app_commands.Choice(name=row.name, value=row.name) for row in rows]
+    finally:
+        db.close()
+
+
+# ── Cog ────────────────────────────────────────────────────────────────────────
+
 class MentorshipCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -21,29 +133,51 @@ class MentorshipCog(commands.Cog):
 
     # ── Create ─────────────────────────────────────────────────────────────────
 
-    @group.command(name="create", description="Create a new mentorship group")
+    @group.command(name="create", description="Create a new mentorship group (you become its first lead mentor)")
     @app_commands.describe(name="Name of the mentorship (e.g. 'Batch 3 — Taiko')")
-    @app_commands.default_permissions(manage_guild=True)
     async def create(self, interaction: discord.Interaction, name: str):
         db: Session = SessionLocal()
         try:
+            # Require the invoker to be verified so they can be auto-added
+            identity = _get_identity(db, str(interaction.user.id))
+            if not identity:
+                await interaction.response.send_message(
+                    "You need to verify your osu! account before creating a mentorship. "
+                    "Run `/verify` first.",
+                    ephemeral=True,
+                )
+                return
+
             clash = db.query(Mentorship).filter(
                 Mentorship.discord_guild_id == str(interaction.guild_id),
                 Mentorship.name             == name,
             ).first()
             if clash:
                 await interaction.response.send_message(
-                    f"A mentorship named **{name}** already exists (ID `{clash.id}`).", ephemeral=True
+                    f"A mentorship named **{name}** already exists in this server.", ephemeral=True
                 )
                 return
 
-            m = Mentorship(name=name, discord_guild_id=str(interaction.guild_id))
+            m = Mentorship(
+                name=name,
+                discord_guild_id=str(interaction.guild_id),
+                creator_discord_id=str(interaction.user.id),
+            )
             db.add(m)
+            db.flush()  # get m.id before adding the member row
+
+            # Auto-add the creator as lead mentor
+            db.add(MentorshipMember(
+                mentorship_id=m.id,
+                osu_user_id=identity.osu_user_id,
+                role=UserRole.lead_mentor,
+            ))
             db.commit()
             db.refresh(m)
+
             await interaction.response.send_message(
-                f"✅ Created mentorship **{name}** — ID: `{m.id}`\n"
-                f"Use `/mentorship add` to assign members."
+                f"✅ Created mentorship **{name}**.\n"
+                f"You've been added as its Lead Mentor. Use `/mentorship add` to invite others."
             )
         finally:
             db.close()
@@ -56,12 +190,14 @@ class MentorshipCog(commands.Cog):
         try:
             rows = db.query(Mentorship).filter(
                 Mentorship.discord_guild_id == str(interaction.guild_id)
-            ).all()
+            ).order_by(Mentorship.name).all()
             if not rows:
                 await interaction.response.send_message("No mentorships created yet.", ephemeral=True)
                 return
-            lines = [f"• **{m.name}** — ID `{m.id}` ({len(m.members)} member(s))" for m in rows]
-            await interaction.response.send_message("**Mentorships in this server:**\n" + "\n".join(lines))
+            lines = [f"• **{m.name}** ({len(m.members)} member(s))" for m in rows]
+            await interaction.response.send_message(
+                "**Mentorships in this server:**\n" + "\n".join(lines)
+            )
         finally:
             db.close()
 
@@ -69,7 +205,7 @@ class MentorshipCog(commands.Cog):
 
     @group.command(name="add", description="Add or update a member in a mentorship")
     @app_commands.describe(
-        mentorship_id="Mentorship ID (from /mentorship list)",
+        mentorship_name="Mentorship name",
         user="Discord user to add",
         role="Their role in this mentorship",
     )
@@ -78,27 +214,43 @@ class MentorshipCog(commands.Cog):
         app_commands.Choice(name="Mentor",      value="mentor"),
         app_commands.Choice(name="Mentee",      value="mentee"),
     ])
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.autocomplete(mentorship_name=_my_mentorships_autocomplete)
     async def add_member(
         self,
         interaction: discord.Interaction,
-        mentorship_id: int,
+        mentorship_name: str,
         user: discord.Member,
         role: str,
     ):
         db: Session = SessionLocal()
         try:
-            mentorship = db.query(Mentorship).filter(
-                Mentorship.id               == mentorship_id,
-                Mentorship.discord_guild_id == str(interaction.guild_id),
-            ).first()
+            mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
             if not mentorship:
-                await interaction.response.send_message("Mentorship not found.", ephemeral=True)
+                await interaction.response.send_message(
+                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                )
                 return
 
-            identity = db.query(UserIdentity).filter(
-                UserIdentity.discord_id == str(user.id)
-            ).first()
+            invoker_discord_id = str(interaction.user.id)
+
+            # Permission check
+            if role == "lead_mentor":
+                # Only the creator can add a new lead mentor
+                if not _is_creator(mentorship, invoker_discord_id):
+                    await interaction.response.send_message(
+                        "Only the mentorship **creator** can add Lead Mentors.", ephemeral=True
+                    )
+                    return
+            else:
+                # Lead mentors can add mentors/mentees
+                if not _is_lead_mentor(db, mentorship.id, invoker_discord_id):
+                    await interaction.response.send_message(
+                        "Only **Lead Mentors** of this mentorship can add members.", ephemeral=True
+                    )
+                    return
+
+            # Target user must be verified
+            identity = _get_identity(db, str(user.id))
             if not identity:
                 await interaction.response.send_message(
                     f"{user.mention} hasn't verified their osu! account yet. "
@@ -107,13 +259,9 @@ class MentorshipCog(commands.Cog):
                 )
                 return
 
-            existing = db.query(MentorshipMember).filter(
-                MentorshipMember.mentorship_id == mentorship_id,
-                MentorshipMember.osu_user_id   == identity.osu_user_id,
-            ).first()
-
+            existing = _get_member_entry(db, mentorship.id, identity.osu_user_id)
             if existing:
-                old_role     = existing.role
+                old_role      = existing.role
                 existing.role = UserRole(role)
                 db.commit()
                 await interaction.response.send_message(
@@ -122,7 +270,7 @@ class MentorshipCog(commands.Cog):
                 )
             else:
                 db.add(MentorshipMember(
-                    mentorship_id=mentorship_id,
+                    mentorship_id=mentorship.id,
                     osu_user_id=identity.osu_user_id,
                     role=UserRole(role),
                 ))
@@ -137,45 +285,57 @@ class MentorshipCog(commands.Cog):
     # ── Remove member ──────────────────────────────────────────────────────────
 
     @group.command(name="remove", description="Remove a member from a mentorship")
-    @app_commands.describe(mentorship_id="Mentorship ID", user="Discord user to remove")
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(
+        mentorship_name="Mentorship name",
+        user="Discord user to remove",
+    )
+    @app_commands.autocomplete(mentorship_name=_my_mentorships_autocomplete)
     async def remove_member(
         self,
         interaction: discord.Interaction,
-        mentorship_id: int,
+        mentorship_name: str,
         user: discord.Member,
     ):
         db: Session = SessionLocal()
         try:
-            mentorship = db.query(Mentorship).filter(
-                Mentorship.id               == mentorship_id,
-                Mentorship.discord_guild_id == str(interaction.guild_id),
-            ).first()
+            mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
             if not mentorship:
-                await interaction.response.send_message("Mentorship not found.", ephemeral=True)
+                await interaction.response.send_message(
+                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                )
                 return
 
-            identity = db.query(UserIdentity).filter(
-                UserIdentity.discord_id == str(user.id)
-            ).first()
-            if not identity:
+            invoker_discord_id = str(interaction.user.id)
+            target_identity = _get_identity(db, str(user.id))
+            if not target_identity:
                 await interaction.response.send_message(f"{user.mention} is not verified.", ephemeral=True)
                 return
 
-            member = db.query(MentorshipMember).filter(
-                MentorshipMember.mentorship_id == mentorship_id,
-                MentorshipMember.osu_user_id   == identity.osu_user_id,
-            ).first()
+            member = _get_member_entry(db, mentorship.id, target_identity.osu_user_id)
             if not member:
                 await interaction.response.send_message(
                     f"{user.mention} is not in **{mentorship.name}**.", ephemeral=True
                 )
                 return
 
+            # Permission check based on the target's current role
+            if member.role == UserRole.lead_mentor:
+                if not _is_creator(mentorship, invoker_discord_id):
+                    await interaction.response.send_message(
+                        "Only the mentorship **creator** can remove Lead Mentors.", ephemeral=True
+                    )
+                    return
+            else:
+                if not _is_lead_mentor(db, mentorship.id, invoker_discord_id):
+                    await interaction.response.send_message(
+                        "Only **Lead Mentors** of this mentorship can remove members.", ephemeral=True
+                    )
+                    return
+
             db.delete(member)
             db.commit()
             await interaction.response.send_message(
-                f"Removed {user.mention} (**{identity.osu_username}**) from **{mentorship.name}**"
+                f"Removed {user.mention} (**{target_identity.osu_username}**) from **{mentorship.name}**"
             )
         finally:
             db.close()
@@ -183,20 +343,20 @@ class MentorshipCog(commands.Cog):
     # ── Members list ───────────────────────────────────────────────────────────
 
     @group.command(name="members", description="List all members of a mentorship")
-    @app_commands.describe(mentorship_id="Mentorship ID")
-    async def members(self, interaction: discord.Interaction, mentorship_id: int):
+    @app_commands.describe(mentorship_name="Mentorship name")
+    @app_commands.autocomplete(mentorship_name=_mentorship_autocomplete)
+    async def members(self, interaction: discord.Interaction, mentorship_name: str):
         db: Session = SessionLocal()
         try:
-            mentorship = db.query(Mentorship).filter(
-                Mentorship.id               == mentorship_id,
-                Mentorship.discord_guild_id == str(interaction.guild_id),
-            ).first()
+            mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
             if not mentorship:
-                await interaction.response.send_message("Mentorship not found.", ephemeral=True)
+                await interaction.response.send_message(
+                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                )
                 return
 
             rows = db.query(MentorshipMember).filter(
-                MentorshipMember.mentorship_id == mentorship_id
+                MentorshipMember.mentorship_id == mentorship.id
             ).all()
             if not rows:
                 await interaction.response.send_message(
@@ -210,7 +370,7 @@ class MentorshipCog(commands.Cog):
                 for i in db.query(UserIdentity).filter(UserIdentity.osu_user_id.in_(osu_ids)).all()
             }
 
-            order  = {UserRole.lead_mentor: 0, UserRole.mentor: 1, UserRole.mentee: 2}
+            order       = {UserRole.lead_mentor: 0, UserRole.mentor: 1, UserRole.mentee: 2}
             sorted_rows = sorted(rows, key=lambda r: order.get(r.role, 9))
 
             lines = [f"**{mentorship.name}** members:\n"]
@@ -229,17 +389,17 @@ class MentorshipCog(commands.Cog):
     # ── Delete ─────────────────────────────────────────────────────────────────
 
     @group.command(name="delete", description="Delete a mentorship and all its data (irreversible)")
-    @app_commands.describe(mentorship_id="Mentorship ID to delete")
+    @app_commands.describe(mentorship_name="Mentorship name to delete")
+    @app_commands.autocomplete(mentorship_name=_mentorship_autocomplete)
     @app_commands.default_permissions(administrator=True)
-    async def delete_mentorship(self, interaction: discord.Interaction, mentorship_id: int):
+    async def delete_mentorship(self, interaction: discord.Interaction, mentorship_name: str):
         db: Session = SessionLocal()
         try:
-            mentorship = db.query(Mentorship).filter(
-                Mentorship.id               == mentorship_id,
-                Mentorship.discord_guild_id == str(interaction.guild_id),
-            ).first()
+            mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
             if not mentorship:
-                await interaction.response.send_message("Mentorship not found.", ephemeral=True)
+                await interaction.response.send_message(
+                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                )
                 return
 
             name = mentorship.name
