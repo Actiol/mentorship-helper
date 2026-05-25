@@ -131,8 +131,8 @@ Once deployed, verify everything is working:
 If using Cloudflare tunnel, configure it to point to your internal mentorship service:
 
 **In Cloudflare Tunnel Config:**
-- **Service:** `http://mentorship:80`
-- **Network:** Ensure tunnel container is on same `mentorship` bridge network
+- **Service:** `http://mentorship-api:8000` or `http://nginx` (depends on your setup)
+- **Network:** Stack name will be `mentorship` (Portainer auto-prefixes network names)
 
 ---
 

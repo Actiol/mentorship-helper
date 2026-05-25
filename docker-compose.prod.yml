@@ -12,7 +12,7 @@ version: '3.8'
 services:
   db:
     image: postgres:16-alpine
-    restart: always
+    restart: unless-stopped
     container_name: mentorship-db
     labels:
       com.mentorship.description: "PostgreSQL database for mentorship application"
@@ -43,7 +43,7 @@ services:
       context: .
       dockerfile: api/Dockerfile
     image: ${DOCKER_REGISTRY:-mentorship}/api:${API_TAG:-latest}
-    restart: always
+    restart: unless-stopped
     container_name: mentorship-api
     labels:
       com.mentorship.description: "FastAPI backend for mentorship application"
@@ -84,7 +84,7 @@ services:
       context: .
       dockerfile: bot/Dockerfile
     image: ${DOCKER_REGISTRY:-mentorship}/bot:${BOT_TAG:-latest}
-    restart: always
+    restart: unless-stopped
     container_name: mentorship-bot
     labels:
       com.mentorship.description: "Discord bot for mentorship verification"
@@ -113,7 +113,7 @@ services:
       context: ./nginx
       dockerfile: Dockerfile
     image: ${DOCKER_REGISTRY:-mentorship}/nginx:${NGINX_TAG:-latest}
-    restart: always
+    restart: unless-stopped
     container_name: mentorship-nginx
     labels:
       com.mentorship.description: "Nginx reverse proxy and SSL termination"
@@ -125,10 +125,8 @@ services:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
     volumes:
-      - ./userscript:/srv/userscript:ro
       - ./nginx/certs:/etc/nginx/certs:ro
       - oszdata:/data/osz:ro
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     networks:
       - mentorship
     healthcheck:
