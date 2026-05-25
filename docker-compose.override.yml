@@ -6,6 +6,8 @@ services:
       - ./api:/app/api-src     # mount source for hot reload
       - ./shared:/app/shared
       - oszdata:/data/osz
+    ports:
+      - "8001:8000"            # expose API directly for development
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   db:
@@ -17,6 +19,3 @@ services:
       - "80:80"
     # In dev you probably don't have SSL certs; use HTTP only via nginx on port 80
     # or skip nginx entirely and hit the API directly on port 8001:
-  api:
-    ports:
-      - "8001:8000"

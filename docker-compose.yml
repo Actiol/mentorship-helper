@@ -1,41 +1,55 @@
-services:
+version: '3.8'
 
+services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_USER:     ${POSTGRES_USER:-mentorship}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_DB:       ${POSTGRES_DB:-mentorship}
+      PGDATA:            /var/lib/postgresql/data/pgdata
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - mentorship
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mentorship} -d ${POSTGRES_DB:-mentorship}"]
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 10s
 
   api:
     build:
-      context: .            # repo root so Dockerfile can COPY shared/
+      context: .
       dockerfile: api/Dockerfile
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL:      postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      DATABASE_URL:      postgresql://${POSTGRES_USER:-mentorship}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mentorship}
       OSU_CLIENT_ID:     ${OSU_CLIENT_ID}
       OSU_CLIENT_SECRET: ${OSU_CLIENT_SECRET}
       JWT_SECRET:        ${JWT_SECRET}
-      BASE_URL:          ${BASE_URL}
-      ALLOWED_ORIGINS:   ${ALLOWED_ORIGINS}
+      BASE_URL:          ${BASE_URL:-https://mentorship.actiol.dev}
+      ALLOWED_ORIGINS:   ${ALLOWED_ORIGINS:-https://osu.ppy.sh}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
       OSZ_STORAGE_DIR:   /data/osz
+      LOG_LEVEL:         ${LOG_LEVEL:-info}
     volumes:
       - oszdata:/data/osz
+    networks:
+      - mentorship
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   bot:
     build:
@@ -46,12 +60,15 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL:        postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      DATABASE_URL:        postgresql://${POSTGRES_USER:-mentorship}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mentorship}
       DISCORD_TOKEN:       ${DISCORD_TOKEN}
       DISCORD_CLIENT_ID:   ${DISCORD_CLIENT_ID}
-      OSU_VERIFY_BASE_URL: ${OSU_VERIFY_BASE_URL}
-      API_BASE_URL:        ${API_BASE_URL}
+      OSU_VERIFY_BASE_URL: ${OSU_VERIFY_BASE_URL:-https://mentorship.actiol.dev/auth/discord-verify}
+      API_BASE_URL:        ${API_BASE_URL:-https://mentorship.actiol.dev}
       API_BOT_SECRET:      ${API_BOT_SECRET}
+      LOG_LEVEL:           ${LOG_LEVEL:-info}
+    networks:
+      - mentorship
 
   nginx:
     build:
@@ -59,15 +76,31 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
-      - "80:80"
-      - "443:443"
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
     volumes:
-      - ./userscript:/srv/userscript:ro   # serves mentorship.user.js
-      - ./nginx/certs:/etc/nginx/certs:ro # SSL certs (e.g. from certbot)
-      - oszdata:/data/osz:ro              # read-only: only api writes here
+      - ./userscript:/srv/userscript:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - oszdata:/data/osz:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - mentorship
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 volumes:
   pgdata:
+    driver: local
   oszdata:
+    driver: local
+
+networks:
+  mentorship:
+    driver: bridge

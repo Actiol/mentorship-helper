@@ -1,6 +1,7 @@
 import asyncio
 import discord
 from discord.ext import commands
+from loguru import logger
 from .config import settings
 
 
@@ -17,16 +18,17 @@ class MentorshipBot(commands.Bot):
         await self.load_extension("app.cogs.mentorship")
         await self.load_extension("app.cogs.maps")
         await self.tree.sync()
-        print("✅ Slash commands synced")
+        logger.info("✅ Slash commands synced")
 
     async def on_ready(self):
-        print(f"🤖 Bot online as {self.user} (ID: {self.user.id})")
+        logger.info(f"🤖 Bot online as {self.user} (ID: {self.user.id})")
 
     async def on_command_error(self, ctx, error):
-        print(f"[error] {error}")
+        logger.error(f"Command error: {error}", exc_info=True)
 
 
 def main():
+    logger.info("Starting Discord bot...")
     bot = MentorshipBot()
     bot.run(settings.discord_token)
 

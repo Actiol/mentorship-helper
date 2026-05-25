@@ -1,0 +1,194 @@
+================================================================================
+PRE-DEPLOYMENT CHECKLIST FOR PORTAINER
+================================================================================
+
+Domain: mentorship.actiol.dev
+Target: Docker Stack on Portainer
+
+PHASE 1: PREPARATION (Complete BEFORE contacting ops/infrastructure)
+================================================================================
+
+[ ] Read all documentation:
+    [ ] INDEX.md - Navigation guide
+    [ ] README-PORTAINER.md - Complete system overview
+    [ ] PORTAINER-DEPLOYMENT.md - Step-by-step deployment
+
+[ ] Gather OAuth credentials:
+    [ ] osu! OAuth Application ID: ____________________
+    [ ] osu! OAuth Application Secret: ____________________
+    [ ] Discord Bot Token: ____________________
+    [ ] Discord Client ID: ____________________
+
+[ ] Generate secrets (run these commands and record output):
+    [ ] JWT_SECRET=$(openssl rand -hex 32)
+        Value: ____________________________________
+    [ ] POSTGRES_PASSWORD=$(openssl rand -hex 32)
+        Value: ____________________________________
+    [ ] API_BOT_SECRET=$(openssl rand -hex 32)
+        Value: ____________________________________
+
+[ ] Prepare SSL certificates:
+    [ ] fullchain.pem obtained
+    [ ] privkey.pem obtained
+    [ ] Certificates ready to copy to nginx/certs/
+    [ ] Certificate expiration date noted: ____________________
+
+[ ] Infrastructure prerequisites:
+    [ ] Docker host available (minimum 2GB RAM)
+    [ ] Portainer installed and accessible
+    [ ] Domain mentorship.actiol.dev resolves to Docker host
+    [ ] Firewall allows ports 80 and 443
+    [ ] At least 10GB storage available
+
+PHASE 2: PORTAINER SETUP (Done by infrastructure team)
+================================================================================
+
+[ ] Create new Portainer Stack:
+    [ ] Stack name: "mentorship"
+    [ ] Upload: docker-compose.prod.yml
+
+[ ] Configure environment variables in Portainer:
+    [ ] POSTGRES_PASSWORD
+    [ ] POSTGRES_USER = mentorship
+    [ ] POSTGRES_DB = mentorship
+    [ ] JWT_SECRET
+    [ ] OSU_CLIENT_ID
+    [ ] OSU_CLIENT_SECRET
+    [ ] DISCORD_BOT_TOKEN
+    [ ] DISCORD_TOKEN (same as DISCORD_BOT_TOKEN)
+    [ ] DISCORD_CLIENT_ID
+    [ ] API_BOT_SECRET
+    [ ] BASE_URL = https://mentorship.actiol.dev
+    [ ] API_BASE_URL = https://mentorship.actiol.dev
+    [ ] OSU_VERIFY_BASE_URL = https://mentorship.actiol.dev/auth/discord-verify
+    [ ] ALLOWED_ORIGINS = https://osu.ppy.sh
+
+[ ] Configure SSL certificates:
+    [ ] Copy fullchain.pem to nginx/certs/
+    [ ] Copy privkey.pem to nginx/certs/
+    [ ] File permissions verified (644 or 755)
+
+[ ] Deploy stack in Portainer:
+    [ ] Click "Deploy the stack"
+    [ ] Monitor deployment logs
+    [ ] All services reach "healthy" or "running" status
+
+PHASE 3: VERIFICATION (Post-deployment)
+================================================================================
+
+[ ] Health checks pass:
+    [ ] curl -k https://mentorship.actiol.dev/health
+        Expected: 200 OK
+    
+    [ ] curl -k https://mentorship.actiol.dev/docs
+        Expected: 200 OK with API documentation
+
+[ ] All services healthy in Portainer:
+    [ ] db (PostgreSQL): healthy
+    [ ] api (FastAPI): healthy
+    [ ] bot (Discord): running
+    [ ] nginx (Reverse proxy): healthy
+
+[ ] Check logs for errors:
+    [ ] API logs: No errors
+    [ ] Bot logs: Connected to Discord
+    [ ] Nginx logs: Receiving requests
+    [ ] Database logs: Ready for connections
+
+[ ] SSL certificate valid:
+    [ ] Certificate not expired
+    [ ] Certificate matches domain name
+    [ ] No SSL/TLS warnings in browser
+
+[ ] Database connectivity:
+    [ ] docker exec mentorship-db psql -U mentorship -d mentorship -c "SELECT 1;"
+        Expected: output shows "1"
+
+PHASE 4: OPERATIONAL HANDOFF
+================================================================================
+
+[ ] Document current status
+    [ ] All services healthy: YES / NO
+    [ ] Database accessible: YES / NO
+    [ ] API responding: YES / NO
+    [ ] Bot connected: YES / NO
+
+[ ] Create backup:
+    [ ] docker exec mentorship-db pg_dump -U mentorship mentorship > backup-initial.sql
+    [ ] Backup file location: ____________________
+
+[ ] Brief operations team:
+    [ ] OPERATOR-CHECKLIST.md reviewed
+    [ ] QUICK-REFERENCE.md provided to ops
+    [ ] Emergency procedures documented
+    [ ] Escalation contacts established
+
+[ ] Set up monitoring (optional):
+    [ ] Log aggregation configured
+    [ ] Alerts configured
+    [ ] Health check monitoring enabled
+
+CRITICAL ENVIRONMENT VARIABLES (Don't lose these!)
+================================================================================
+
+Keep these in a secure location (password manager, vault, etc.):
+
+POSTGRES_PASSWORD     = ____________________________________
+JWT_SECRET            = ____________________________________
+API_BOT_SECRET        = ____________________________________
+OSU_CLIENT_ID         = ____________________________________
+OSU_CLIENT_SECRET     = ____________________________________
+DISCORD_BOT_TOKEN     = ____________________________________
+DISCORD_CLIENT_ID     = ____________________________________
+
+EMERGENCY CONTACTS
+================================================================================
+
+Infrastructure Lead: ____________________________________
+Operations Lead:     ____________________________________
+Security Contact:    ____________________________________
+
+TROUBLESHOOTING QUICK REFERENCE
+================================================================================
+
+Service won't start:
+  -> Check logs: docker logs <service-name>
+  -> Review environment variables
+  -> Verify disk space: docker exec <service> df -h
+
+High error rate:
+  -> Check logs: docker logs -f <service>
+  -> Verify connectivity between services
+  -> Check resource limits (CPU, memory)
+
+SSL certificate errors:
+  -> Verify files: ls -la nginx/certs/
+  -> Check expiration: openssl x509 -in nginx/certs/fullchain.pem -noout -dates
+
+Database issues:
+  -> Test connection: docker exec mentorship-db psql -U mentorship
+  -> Check disk space: docker exec mentorship-db df -h
+  -> Restore from backup if needed
+
+For detailed troubleshooting, see:
+  -> README-PORTAINER.md (Troubleshooting section)
+  -> QUICK-REFERENCE.md (Troubleshooting table)
+  -> OPERATOR-CHECKLIST.md (Incident Response)
+
+NOTES & ADDITIONAL INFORMATION
+================================================================================
+
+Date Started:          ____________________
+Date Completed:        ____________________
+Deployment By:         ____________________
+Verified By:           ____________________
+
+Additional Notes:
+________________________________________________________________________________
+________________________________________________________________________________
+________________________________________________________________________________
+________________________________________________________________________________
+
+================================================================================
+End of Pre-Deployment Checklist
+================================================================================
