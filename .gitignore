@@ -1,0 +1,19 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# SSL certs (managed by certbot on the server)
+nginx/certs/
+
+# DB data (Docker volumes, not in repo)
+pgdata/
+
+# IDE
+.vscode/
+.idea/

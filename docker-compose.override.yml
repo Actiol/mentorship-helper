@@ -1,0 +1,22 @@
+# Local development overrides — not committed if you prefer, but safe to commit
+# since it only adds dev conveniences (hot reload, exposed ports)
+services:
+  api:
+    volumes:
+      - ./api:/app/api-src     # mount source for hot reload
+      - ./shared:/app/shared
+      - oszdata:/data/osz
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  db:
+    ports:
+      - "5432:5432"            # expose locally for psql / DB GUI
+
+  nginx:
+    ports:
+      - "80:80"
+    # In dev you probably don't have SSL certs; use HTTP only via nginx on port 80
+    # or skip nginx entirely and hit the API directly on port 8001:
+  api:
+    ports:
+      - "8001:8000"
