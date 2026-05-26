@@ -3,7 +3,7 @@
 // @namespace    https://mentorship.actiol.dev
 // @version      1.0.0
 // @description  Adds mentorship feedback panels to osu! beatmap discussion posts
-// @author       you
+// @author       Actiol
 // @match        https://osu.ppy.sh/beatmapsets/*/discussion*
 // @grant        GM_getValue
 // @grant        GM_setValue
