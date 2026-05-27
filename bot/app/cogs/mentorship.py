@@ -1,18 +1,18 @@
 """
 Mentorship management commands.
 
-Permission model:
-  - /mentorship create  → any verified user (they become the first lead mentor automatically)
-  - /mentorship add     → lead mentors may add mentees/mentors; only the creator may add lead mentors
-  - /mentorship remove  → lead mentors may remove mentees/mentors; only the creator may remove lead mentors
-  - /mentorship delete  → server administrators only
-  - /mentorship list    → anyone
-  - /mentorship members → anyone
-
-Mentorship names are used throughout (autocomplete replaces raw IDs).
+Permission model
+  /mentorship create      → any verified user (becomes first lead mentor)
+  /mentorship add         → lead mentors add mentors/mentees
+                            creator always retains add/remove rights regardless of own role
+  /mentorship remove      → same as add
+  /mentorship delete      → server administrators only
+  /mentorship list        → anyone
+  /mentorship members     → anyone
+  /mentorship set-channel → lead mentors only
 """
 
-from typing import List
+from typing import List, Optional
 
 import discord
 from discord import app_commands
@@ -60,12 +60,18 @@ def _is_lead_mentor(db: Session, mentorship_id: int, discord_id: str) -> bool:
 def _is_creator(mentorship: Mentorship, discord_id: str) -> bool:
     """
     True if this Discord user created the mentorship.
-    Falls back to True for legacy rows where creator_discord_id is NULL
-    (any lead mentor can act as creator on those).
+    Creators keep creator-level permissions regardless of their current role —
+    a creator demoted to mentee can still add/remove lead mentors.
+    Falls back to True for legacy rows where creator_discord_id is NULL.
     """
     if mentorship.creator_discord_id is None:
-        return True  # legacy: no creator recorded, defer to lead-mentor check
+        return True   # legacy: any lead mentor acts as creator
     return mentorship.creator_discord_id == discord_id
+
+
+def _has_lead_perms(db: Session, mentorship: Mentorship, discord_id: str) -> bool:
+    """True if the user may perform lead-mentor-level membership actions."""
+    return _is_creator(mentorship, discord_id) or _is_lead_mentor(db, mentorship.id, discord_id)
 
 
 # ── Autocomplete ───────────────────────────────────────────────────────────────
@@ -74,7 +80,6 @@ async def _mentorship_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> List[app_commands.Choice[str]]:
-    """Returns up to 25 mentorship names in this server matching what the user typed."""
     db = SessionLocal()
     try:
         rows = (
@@ -87,7 +92,7 @@ async def _mentorship_autocomplete(
             .limit(25)
             .all()
         )
-        return [app_commands.Choice(name=row.name, value=row.name) for row in rows]
+        return [app_commands.Choice(name=r.name, value=r.name) for r in rows]
     finally:
         db.close()
 
@@ -96,29 +101,26 @@ async def _my_mentorships_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> List[app_commands.Choice[str]]:
-    """
-    Returns mentorships in this server where the invoker is a lead mentor.
-    Used for commands that require lead-mentor permissions.
-    """
+    """Mentorships where the invoker has lead-level permissions."""
     db = SessionLocal()
     try:
-        identity = _get_identity(db, str(interaction.user.id))
-        if not identity:
-            return []
         rows = (
             db.query(Mentorship)
-            .join(MentorshipMember, MentorshipMember.mentorship_id == Mentorship.id)
             .filter(
-                Mentorship.discord_guild_id      == str(interaction.guild_id),
-                MentorshipMember.osu_user_id     == identity.osu_user_id,
-                MentorshipMember.role            == UserRole.lead_mentor,
+                Mentorship.discord_guild_id == str(interaction.guild_id),
                 Mentorship.name.ilike(f"%{current}%"),
             )
             .order_by(Mentorship.name)
-            .limit(25)
+            .limit(50)
             .all()
         )
-        return [app_commands.Choice(name=row.name, value=row.name) for row in rows]
+        result = []
+        for m in rows:
+            if _has_lead_perms(db, m, str(interaction.user.id)):
+                result.append(app_commands.Choice(name=m.name, value=m.name))
+            if len(result) == 25:
+                break
+        return result
     finally:
         db.close()
 
@@ -134,27 +136,23 @@ class MentorshipCog(commands.Cog):
     # ── Create ─────────────────────────────────────────────────────────────────
 
     @group.command(name="create", description="Create a new mentorship group (you become its first lead mentor)")
-    @app_commands.describe(name="Name of the mentorship (e.g. 'Batch 3 — Taiko')")
+    @app_commands.describe(name="Name of the mentorship")
     async def create(self, interaction: discord.Interaction, name: str):
         db: Session = SessionLocal()
         try:
-            # Require the invoker to be verified so they can be auto-added
             identity = _get_identity(db, str(interaction.user.id))
             if not identity:
                 await interaction.response.send_message(
-                    "You need to verify your osu! account before creating a mentorship. "
-                    "Run `/verify` first.",
-                    ephemeral=True,
+                    "You need to verify your osu! account first. Run `/verify`.", ephemeral=True
                 )
                 return
 
-            clash = db.query(Mentorship).filter(
+            if db.query(Mentorship).filter(
                 Mentorship.discord_guild_id == str(interaction.guild_id),
                 Mentorship.name             == name,
-            ).first()
-            if clash:
+            ).first():
                 await interaction.response.send_message(
-                    f"A mentorship named **{name}** already exists in this server.", ephemeral=True
+                    f"A mentorship named **{name}** already exists.", ephemeral=True
                 )
                 return
 
@@ -164,20 +162,15 @@ class MentorshipCog(commands.Cog):
                 creator_discord_id=str(interaction.user.id),
             )
             db.add(m)
-            db.flush()  # get m.id before adding the member row
-
-            # Auto-add the creator as lead mentor
+            db.flush()
             db.add(MentorshipMember(
                 mentorship_id=m.id,
                 osu_user_id=identity.osu_user_id,
                 role=UserRole.lead_mentor,
             ))
             db.commit()
-            db.refresh(m)
-
             await interaction.response.send_message(
-                f"✅ Created mentorship **{name}**.\n"
-                f"You've been added as its Lead Mentor. Use `/mentorship add` to invite others."
+                f"✅ Created **{name}**. You've been added as Lead Mentor."
             )
         finally:
             db.close()
@@ -192,7 +185,7 @@ class MentorshipCog(commands.Cog):
                 Mentorship.discord_guild_id == str(interaction.guild_id)
             ).order_by(Mentorship.name).all()
             if not rows:
-                await interaction.response.send_message("No mentorships created yet.", ephemeral=True)
+                await interaction.response.send_message("No mentorships yet.", ephemeral=True)
                 return
             lines = [f"• **{m.name}** ({len(m.members)} member(s))" for m in rows]
             await interaction.response.send_message(
@@ -207,7 +200,7 @@ class MentorshipCog(commands.Cog):
     @app_commands.describe(
         mentorship_name="Mentorship name",
         user="Discord user to add",
-        role="Their role in this mentorship",
+        role="Their role",
     )
     @app_commands.choices(role=[
         app_commands.Choice(name="Lead Mentor", value="lead_mentor"),
@@ -227,35 +220,29 @@ class MentorshipCog(commands.Cog):
             mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
             if not mentorship:
                 await interaction.response.send_message(
-                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                    f"Mentorship **{mentorship_name}** not found.", ephemeral=True
                 )
                 return
 
-            invoker_discord_id = str(interaction.user.id)
+            invoker_id = str(interaction.user.id)
 
-            # Permission check
             if role == "lead_mentor":
-                # Only the creator can add a new lead mentor
-                if not _is_creator(mentorship, invoker_discord_id):
+                if not _is_creator(mentorship, invoker_id):
                     await interaction.response.send_message(
                         "Only the mentorship **creator** can add Lead Mentors.", ephemeral=True
                     )
                     return
             else:
-                # Lead mentors can add mentors/mentees
-                if not _is_lead_mentor(db, mentorship.id, invoker_discord_id):
+                if not _has_lead_perms(db, mentorship, invoker_id):
                     await interaction.response.send_message(
-                        "Only **Lead Mentors** of this mentorship can add members.", ephemeral=True
+                        "Only **Lead Mentors** (or the creator) can add members.", ephemeral=True
                     )
                     return
 
-            # Target user must be verified
             identity = _get_identity(db, str(user.id))
             if not identity:
                 await interaction.response.send_message(
-                    f"{user.mention} hasn't verified their osu! account yet. "
-                    f"They need to run `/verify` first.",
-                    ephemeral=True,
+                    f"{user.mention} hasn't verified their osu! account yet.", ephemeral=True
                 )
                 return
 
@@ -265,8 +252,8 @@ class MentorshipCog(commands.Cog):
                 existing.role = UserRole(role)
                 db.commit()
                 await interaction.response.send_message(
-                    f"Updated {user.mention} (**{identity.osu_username}**) "
-                    f"from `{old_role.value}` → `{role}` in **{mentorship.name}**"
+                    f"Updated {user.mention} (**{identity.osu_username}**): "
+                    f"`{old_role.value}` → `{role}` in **{mentorship.name}**"
                 )
             else:
                 db.add(MentorshipMember(
@@ -285,10 +272,7 @@ class MentorshipCog(commands.Cog):
     # ── Remove member ──────────────────────────────────────────────────────────
 
     @group.command(name="remove", description="Remove a member from a mentorship")
-    @app_commands.describe(
-        mentorship_name="Mentorship name",
-        user="Discord user to remove",
-    )
+    @app_commands.describe(mentorship_name="Mentorship name", user="Discord user to remove")
     @app_commands.autocomplete(mentorship_name=_my_mentorships_autocomplete)
     async def remove_member(
         self,
@@ -301,14 +285,16 @@ class MentorshipCog(commands.Cog):
             mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
             if not mentorship:
                 await interaction.response.send_message(
-                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                    f"Mentorship **{mentorship_name}** not found.", ephemeral=True
                 )
                 return
 
-            invoker_discord_id = str(interaction.user.id)
+            invoker_id      = str(interaction.user.id)
             target_identity = _get_identity(db, str(user.id))
             if not target_identity:
-                await interaction.response.send_message(f"{user.mention} is not verified.", ephemeral=True)
+                await interaction.response.send_message(
+                    f"{user.mention} is not verified.", ephemeral=True
+                )
                 return
 
             member = _get_member_entry(db, mentorship.id, target_identity.osu_user_id)
@@ -318,17 +304,16 @@ class MentorshipCog(commands.Cog):
                 )
                 return
 
-            # Permission check based on the target's current role
             if member.role == UserRole.lead_mentor:
-                if not _is_creator(mentorship, invoker_discord_id):
+                if not _is_creator(mentorship, invoker_id):
                     await interaction.response.send_message(
-                        "Only the mentorship **creator** can remove Lead Mentors.", ephemeral=True
+                        "Only the **creator** can remove Lead Mentors.", ephemeral=True
                     )
                     return
             else:
-                if not _is_lead_mentor(db, mentorship.id, invoker_discord_id):
+                if not _has_lead_perms(db, mentorship, invoker_id):
                     await interaction.response.send_message(
-                        "Only **Lead Mentors** of this mentorship can remove members.", ephemeral=True
+                        "Only **Lead Mentors** (or the creator) can remove members.", ephemeral=True
                     )
                     return
 
@@ -351,7 +336,7 @@ class MentorshipCog(commands.Cog):
             mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
             if not mentorship:
                 await interaction.response.send_message(
-                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                    f"Mentorship **{mentorship_name}** not found.", ephemeral=True
                 )
                 return
 
@@ -373,7 +358,7 @@ class MentorshipCog(commands.Cog):
             order       = {UserRole.lead_mentor: 0, UserRole.mentor: 1, UserRole.mentee: 2}
             sorted_rows = sorted(rows, key=lambda r: order.get(r.role, 9))
 
-            lines = [f"**{mentorship.name}** members:\n"]
+            lines        = [f"**{mentorship.name}** members:\n"]
             current_role = None
             for r in sorted_rows:
                 if r.role != current_role:
@@ -383,6 +368,52 @@ class MentorshipCog(commands.Cog):
                 lines.append(f"  • {username}")
 
             await interaction.response.send_message("\n".join(lines))
+        finally:
+            db.close()
+
+    # ── Set notification channel ───────────────────────────────────────────────
+
+    @group.command(
+        name="set-channel",
+        description="Set (or clear) the channel that receives .osz submission notifications",
+    )
+    @app_commands.describe(
+        mentorship_name="Mentorship name",
+        channel="Channel to post in — omit to disable notifications",
+    )
+    @app_commands.autocomplete(mentorship_name=_my_mentorships_autocomplete)
+    async def set_channel(
+        self,
+        interaction: discord.Interaction,
+        mentorship_name: str,
+        channel: Optional[discord.TextChannel] = None,
+    ):
+        db: Session = SessionLocal()
+        try:
+            mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
+            if not mentorship:
+                await interaction.response.send_message(
+                    f"Mentorship **{mentorship_name}** not found.", ephemeral=True
+                )
+                return
+
+            if not _has_lead_perms(db, mentorship, str(interaction.user.id)):
+                await interaction.response.send_message(
+                    "Only **Lead Mentors** can set the notification channel.", ephemeral=True
+                )
+                return
+
+            mentorship.notification_channel_id = str(channel.id) if channel else None
+            db.commit()
+
+            if channel:
+                await interaction.response.send_message(
+                    f"✅ Submission notifications for **{mentorship_name}** → {channel.mention}"
+                )
+            else:
+                await interaction.response.send_message(
+                    f"✅ Submission notifications disabled for **{mentorship_name}**."
+                )
         finally:
             db.close()
 
@@ -398,15 +429,14 @@ class MentorshipCog(commands.Cog):
             mentorship = _get_mentorship_by_name(db, str(interaction.guild_id), mentorship_name)
             if not mentorship:
                 await interaction.response.send_message(
-                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                    f"Mentorship **{mentorship_name}** not found.", ephemeral=True
                 )
                 return
-
             name = mentorship.name
             db.delete(mentorship)
             db.commit()
             await interaction.response.send_message(
-                f"🗑️ Deleted **{name}**. All members, feedback, and discussion records have been removed."
+                f"🗑️ Deleted **{name}**. All members, feedback, and sessions removed."
             )
         finally:
             db.close()

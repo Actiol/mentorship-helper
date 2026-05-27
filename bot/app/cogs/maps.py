@@ -1,12 +1,14 @@
 """
-/submit_map — mentees submit their pre-modded .osz file so mentors can reference it.
+/submit_map — mentees submit their .osz for review.
 
-Two paths:
-  /submit_map mentorship_name beatmapset_id            (then attach the .osz file to the message)
-  /submit_map mentorship_name beatmapset_id url:<link> (bot fetches the file from the URL instead)
+Paths:
+  /submit_map mentorship_name beatmapset_id            → attach .osz to the message
+  /submit_map mentorship_name beatmapset_id url:<link> → bot fetches from URL
 
-The bot downloads the file from Discord's CDN (which expires) and POSTs it to the API,
-which stores it permanently in the Docker volume.
+After a successful upload the bot checks if the mentorship has a notification
+channel set (via /mentorship set-channel). If so, it posts an embed with a
+mod-count summary fetched from the internal /beatmapset/{id}/discussion-summary
+endpoint (which calls the osu! API server-side).
 """
 
 import io
@@ -15,13 +17,14 @@ from typing import List
 import discord
 from discord import app_commands
 from discord.ext import commands
+from loguru import logger
 import httpx
 
 from shared.database import SessionLocal
 from shared.models import UserIdentity, MentorshipMember, Mentorship
 from ..config import settings
 
-DISCORD_MAX_BYTES = 25 * 1024 * 1024  # 25 MB — Discord's attachment limit
+DISCORD_MAX_BYTES = 25 * 1024 * 1024
 
 
 # ── Autocomplete ───────────────────────────────────────────────────────────────
@@ -30,7 +33,6 @@ async def _member_mentorship_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> List[app_commands.Choice[str]]:
-    """Returns mentorship names in this server where the invoker is a member."""
     db = SessionLocal()
     try:
         identity = (
@@ -52,7 +54,7 @@ async def _member_mentorship_autocomplete(
             .limit(25)
             .all()
         )
-        return [app_commands.Choice(name=row.name, value=row.name) for row in rows]
+        return [app_commands.Choice(name=r.name, value=r.name) for r in rows]
     finally:
         db.close()
 
@@ -65,12 +67,12 @@ class MapsCog(commands.Cog):
 
     @app_commands.command(
         name="submit_map",
-        description="Submit the .osz file for a beatmapset you're being mentored on",
+        description="Submit the .osz for a beatmapset you're being mentored on",
     )
     @app_commands.describe(
         mentorship_name="Mentorship name (type to search)",
-        beatmapset_id="osu! beatmapset ID (the number in the URL)",
-        url="Optional: direct download URL if the file is too large to attach (e.g. catbox.moe link)",
+        beatmapset_id="osu! beatmapset ID",
+        url="Direct download URL if the file is too large to attach (catbox.moe etc.)",
     )
     @app_commands.autocomplete(mentorship_name=_member_mentorship_autocomplete)
     async def submit_map(
@@ -84,17 +86,15 @@ class MapsCog(commands.Cog):
 
         db = SessionLocal()
         try:
-            # Verify the Discord user is linked
             identity = db.query(UserIdentity).filter(
                 UserIdentity.discord_id == str(interaction.user.id)
             ).first()
             if not identity:
                 await interaction.followup.send(
-                    "You need to verify your osu! account first. Run `/verify`.", ephemeral=True
+                    "Verify your osu! account first — run `/verify`.", ephemeral=True
                 )
                 return
 
-            # Resolve mentorship by name
             mentorship = (
                 db.query(Mentorship)
                 .filter(
@@ -105,11 +105,10 @@ class MapsCog(commands.Cog):
             )
             if not mentorship:
                 await interaction.followup.send(
-                    f"Mentorship **{mentorship_name}** not found in this server.", ephemeral=True
+                    f"Mentorship **{mentorship_name}** not found.", ephemeral=True
                 )
                 return
 
-            # Verify they're a member of this mentorship
             member = db.query(MentorshipMember).filter(
                 MentorshipMember.mentorship_id == mentorship.id,
                 MentorshipMember.osu_user_id   == identity.osu_user_id,
@@ -122,18 +121,27 @@ class MapsCog(commands.Cog):
 
             uploader_osu_id = identity.osu_user_id
             mentorship_id   = mentorship.id
+            notify_channel  = mentorship.notification_channel_id
+            mentorship_name_str = mentorship.name
         finally:
             db.close()
 
         # ── Path 1: URL provided ───────────────────────────────────────────────
         if url:
-            await self._submit_from_url(interaction, uploader_osu_id, mentorship_id, beatmapset_id, url)
+            success = await self._submit_from_url(
+                interaction, uploader_osu_id, mentorship_id, beatmapset_id, url
+            )
+            if success and notify_channel:
+                await self._maybe_notify(
+                    notify_channel, mentorship_name_str,
+                    beatmapset_id, uploader_osu_id,
+                )
             return
 
-        # ── Path 2: Attachment expected ────────────────────────────────────────
+        # ── Path 2: attachment expected ────────────────────────────────────────
         await interaction.followup.send(
-            f"📎 Please send your `.osz` file as an attachment in this channel within **60 seconds**.\n"
-            f"_(Max size: 25 MB. Larger files: re-run the command with the `url` parameter.)_",
+            "📎 Attach your `.osz` in this channel within **60 seconds**.\n"
+            "_(Max 25 MB — for larger files re-run with the `url` parameter.)_",
             ephemeral=True,
         )
 
@@ -156,37 +164,42 @@ class MapsCog(commands.Cog):
             return
         if attachment.size > DISCORD_MAX_BYTES:
             await interaction.followup.send(
-                f"❌ File is too large ({attachment.size // 1024 // 1024} MB). "
-                "Use the `url` parameter with a catbox.moe or similar link instead.",
+                f"❌ File too large ({attachment.size // 1024 // 1024} MB). "
+                "Use the `url` parameter instead.",
                 ephemeral=True,
             )
             return
 
-        # Download from Discord CDN
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 dl = await client.get(attachment.url)
                 dl.raise_for_status()
                 file_bytes = dl.content
         except httpx.HTTPError as e:
-            await interaction.followup.send(f"❌ Failed to download the file from Discord: {e}", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Couldn't download from Discord: {e}", ephemeral=True
+            )
             return
 
-        await self._post_to_api(
+        success = await self._post_to_api(
             interaction, uploader_osu_id, mentorship_id, beatmapset_id,
-            file_bytes=file_bytes,
-            filename=attachment.filename,
+            file_bytes=file_bytes, filename=attachment.filename,
         )
+        if success and notify_channel:
+            await self._maybe_notify(
+                notify_channel, mentorship_name_str,
+                beatmapset_id, uploader_osu_id,
+            )
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
-    async def _submit_from_url(self, interaction, uploader_osu_id, mentorship_id, beatmapset_id, url):
-        """Have the API fetch the file from the URL (avoids Discord size limit)."""
-        api_url = f"{settings.api_base_url}/files/beatmapset/from-url"
+    async def _submit_from_url(
+        self, interaction, uploader_osu_id, mentorship_id, beatmapset_id, url
+    ) -> bool:
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(
-                    api_url,
+                    f"{settings.api_base_url}/files/beatmapset/from-url",
                     data={
                         "mentorship_id":   str(mentorship_id),
                         "beatmapset_id":   str(beatmapset_id),
@@ -195,28 +208,30 @@ class MapsCog(commands.Cog):
                     },
                     headers={"X-Bot-Secret": settings.api_bot_secret},
                 )
-                if resp.status_code == 200:
-                    info    = resp.json()
-                    size_mb = info["file_size_bytes"] / 1024 / 1024
-                    await interaction.followup.send(
-                        f"✅ Submitted **{info['filename']}** ({size_mb:.1f} MB) "
-                        f"for beatmapset `{beatmapset_id}`.",
-                        ephemeral=True,
-                    )
-                else:
-                    await interaction.followup.send(
-                        f"❌ API error {resp.status_code}: {resp.text}", ephemeral=True
-                    )
+            if resp.status_code == 200:
+                info = resp.json()
+                mb   = info["file_size_bytes"] / 1024 / 1024
+                await interaction.followup.send(
+                    f"✅ Submitted **{info['filename']}** ({mb:.1f} MB) "
+                    f"for beatmapset `{beatmapset_id}`.",
+                    ephemeral=True,
+                )
+                return True
+            await interaction.followup.send(
+                f"❌ API error {resp.status_code}: {resp.text}", ephemeral=True
+            )
+            return False
         except httpx.HTTPError as e:
-            await interaction.followup.send(f"❌ Failed to reach API: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Couldn't reach API: {e}", ephemeral=True)
+            return False
 
-    async def _post_to_api(self, interaction, uploader_osu_id, mentorship_id, beatmapset_id, file_bytes, filename):
-        """Upload the already-downloaded bytes to the API."""
-        api_url = f"{settings.api_base_url}/files/beatmapset"
+    async def _post_to_api(
+        self, interaction, uploader_osu_id, mentorship_id, beatmapset_id, file_bytes, filename
+    ) -> bool:
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(
-                    api_url,
+                    f"{settings.api_base_url}/files/beatmapset",
                     data={
                         "mentorship_id":   str(mentorship_id),
                         "beatmapset_id":   str(beatmapset_id),
@@ -225,20 +240,92 @@ class MapsCog(commands.Cog):
                     files={"file": (filename, io.BytesIO(file_bytes), "application/octet-stream")},
                     headers={"X-Bot-Secret": settings.api_bot_secret},
                 )
-                if resp.status_code == 200:
-                    info    = resp.json()
-                    size_mb = info["file_size_bytes"] / 1024 / 1024
-                    await interaction.followup.send(
-                        f"✅ Submitted **{filename}** ({size_mb:.1f} MB) "
-                        f"for beatmapset `{beatmapset_id}`.",
-                        ephemeral=True,
-                    )
-                else:
-                    await interaction.followup.send(
-                        f"❌ API error {resp.status_code}: {resp.text}", ephemeral=True
-                    )
+            if resp.status_code == 200:
+                info = resp.json()
+                mb   = info["file_size_bytes"] / 1024 / 1024
+                await interaction.followup.send(
+                    f"✅ Submitted **{filename}** ({mb:.1f} MB) "
+                    f"for beatmapset `{beatmapset_id}`.",
+                    ephemeral=True,
+                )
+                return True
+            await interaction.followup.send(
+                f"❌ API error {resp.status_code}: {resp.text}", ephemeral=True
+            )
+            return False
         except httpx.HTTPError as e:
-            await interaction.followup.send(f"❌ Failed to reach API: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Couldn't reach API: {e}", ephemeral=True)
+            return False
+
+    async def _maybe_notify(
+        self,
+        channel_id: str,
+        mentorship_name: str,
+        beatmapset_id: int,
+        uploader_osu_id: int,
+    ) -> None:
+        """Post a submission embed to the configured notification channel."""
+        channel = self.bot.get_channel(int(channel_id))
+        if not channel:
+            logger.warning(f"Notification channel {channel_id} not found or inaccessible")
+            return
+
+        db = SessionLocal()
+        try:
+            identity = db.query(UserIdentity).filter(
+                UserIdentity.osu_user_id == uploader_osu_id
+            ).first()
+            username = identity.osu_username if identity else f"user#{uploader_osu_id}"
+        finally:
+            db.close()
+
+        summary = None
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"{settings.api_base_url}/beatmapset/{beatmapset_id}/discussion-summary",
+                    headers={"X-Bot-Secret": settings.api_bot_secret},
+                )
+                if resp.status_code == 200:
+                    summary = resp.json()
+        except Exception as e:
+            logger.warning(f"Couldn't fetch discussion summary: {e}")
+
+        embed = discord.Embed(
+            title=f"📦 {summary['title']}" if summary else "📦 Map Submitted for Review",
+            color=0x4bd28f,
+        )
+        embed.add_field(
+            name="Mentee",
+            value=f"[{username}](https://osu.ppy.sh/users/{uploader_osu_id})",
+            inline=True,
+        )
+        embed.add_field(name="Mentorship", value=mentorship_name, inline=True)
+        embed.add_field(
+            name="Beatmapset",
+            value=f"[#{beatmapset_id}](https://osu.ppy.sh/beatmapsets/{beatmapset_id})",
+            inline=True,
+        )
+
+        if summary:
+            lines = []
+            if summary.get("general_count", 0):
+                lines.append(f"🗂 General: **{summary['general_count']}**")
+            for diff, count in sorted(summary.get("per_diff", {}).items()):
+                lines.append(f"  └ {diff}: **{count}**")
+            lines.append(f"**Total: {summary.get('total', 0)}**")
+            embed.add_field(
+                name="Current Mods",
+                value="\n".join(lines) if lines else "No mods yet",
+                inline=False,
+            )
+
+        embed.set_footer(text=f"osu! ID: {uploader_osu_id}")
+
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as e:
+            logger.warning(f"Failed to send notification embed: {e}")
 
 
 async def setup(bot: commands.Bot):

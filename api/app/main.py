@@ -10,22 +10,20 @@ from .routers.auth        import router as auth_router
 from .routers.feedback    import router as feedback_router
 from .routers.discussion  import router as discussion_router
 from .routers.mentorship  import router as mentorship_router
-from .routers.files       import router as files_router, BeatmapsetFile
+from .routers.files       import router as files_router, BeatmapsetFile   # noqa: ensure model registered
+from .routers.beatmapset  import router as beatmapset_router
 
-logger.add(lambda msg: None, level=settings.log_level.upper() if hasattr(settings, 'log_level') else "INFO")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting application: Creating missing database tables")
+    logger.info("Starting: creating missing database tables")
     Base.metadata.create_all(bind=engine)
-    from .routers.files import BeatmapsetFile as _  # noqa: ensure model is registered
-    Base.metadata.create_all(bind=engine)
-    logger.info("✅ Application startup complete")
+    logger.info("✅ Startup complete")
     yield
-    logger.info("🛑 Application shutdown")
+    logger.info("🛑 Shutdown")
 
 
-app = FastAPI(title="osu! Mentorship API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="osu! Mentorship API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,16 +33,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-logger.info(f"CORS origins configured: {settings.allowed_origins}")
-
 app.include_router(auth_router)
 app.include_router(feedback_router)
 app.include_router(discussion_router)
 app.include_router(mentorship_router)
 app.include_router(files_router)
+app.include_router(beatmapset_router)
 
 
 @app.get("/health")
 def health():
-    logger.debug("Health check requested")
     return {"ok": True}

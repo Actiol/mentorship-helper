@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     base_url:            str   # e.g. https://mentorship.yourdomain.com (no trailing slash)
     allowed_origins:     str = "https://osu.ppy.sh"
     discord_bot_token:   str  # used by the API to DM users after OAuth verification
+    api_bot_secret:      str  # shared secret for bot → API calls (fixes 500 on /from-url)
+    log_level:           str = "info"
 
     class Config:
         env_file = ".env"
