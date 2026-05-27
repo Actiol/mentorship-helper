@@ -51,6 +51,7 @@ services:
       BASE_URL: ${BASE_URL:-https://mentorship.actiol.dev}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://osu.ppy.sh}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
+      API_BOT_SECRET: ${API_BOT_SECRET}
       OSZ_STORAGE_DIR: /data/osz
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
