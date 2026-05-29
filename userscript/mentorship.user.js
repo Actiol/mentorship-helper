@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         osu! Mentorship Helper
 // @namespace    https://mentorship.actiol.dev
-// @version      2.1.0
+// @version      2.2.0
 // @description  Mentorship feedback panels on osu! beatmap discussions — with offline fallback
 // @author       Actiol
 // @match        https://osu.ppy.sh/*
@@ -24,14 +24,12 @@
     // STORAGE
     // ═════════════════════════════════════════════════════════════════════════
 
-    const getToken   = ()  => GM_getValue('ms_jwt', null);
-    const setToken   = (t) => GM_setValue('ms_jwt', t);
-    const clearToken = ()  => GM_deleteValue('ms_jwt');
+    const getToken    = ()  => GM_getValue('ms_jwt', null);
+    const setToken    = (t) => GM_setValue('ms_jwt', t);
+    const clearToken  = ()  => GM_deleteValue('ms_jwt');
 
-    function getPending() {
-        try { return JSON.parse(GM_getValue('ms_pending', '[]')); } catch { return []; }
-    }
-    function savePending(arr) { GM_setValue('ms_pending', JSON.stringify(arr)); }
+    function getPending()      { try { return JSON.parse(GM_getValue('ms_pending','[]')); } catch { return []; } }
+    function savePending(arr)  { GM_setValue('ms_pending', JSON.stringify(arr)); }
     function addPending(entry) {
         const list = getPending();
         entry.localId = `${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
@@ -44,21 +42,30 @@
         _refreshPendingBadge();
     }
 
-    // Panel position: '1' = between header and discussions, '2' = after new-discussion form
-    const getPanelPos  = ()  => GM_getValue('ms_panel_pos', '1');
-    const setPanelPos  = (v) => GM_setValue('ms_panel_pos', v);
-    const getGlobalMode = () => GM_getValue('ms_global', false);
-    const setGlobalMode = (v) => GM_setValue('ms_global', v);
+    // Mentorship / member cache for offline use
+    function getCachedMs()      { try { return JSON.parse(GM_getValue('ms_cache_ms','[]')); }   catch { return []; } }
+    function getCachedMembers() { try { return JSON.parse(GM_getValue('ms_cache_mem','{}')); }  catch { return {}; } }
+    function cacheMentorships(ms, mem) {
+        GM_setValue('ms_cache_ms',  JSON.stringify(ms));
+        GM_setValue('ms_cache_mem', JSON.stringify(mem));
+    }
+
+    const getPanelPos   = ()  => GM_getValue('ms_panel_pos','1');
+    const setPanelPos   = (v) => GM_setValue('ms_panel_pos', v);
+    const getSavedGlobal = () => GM_getValue('ms_global', false);
+    const setSavedGlobal = (v) => GM_setValue('ms_global', v);
+
+    // Per-session loaded feedback cache for the export feature
+    // key: `${mid}-${postId}` → array of FeedbackOut entries
+    const loadedFeedback = new Map();
 
     // ═════════════════════════════════════════════════════════════════════════
     // JWT
     // ═════════════════════════════════════════════════════════════════════════
 
-    function jwtPayload(token) {
-        try {
-            const b64 = token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-            return JSON.parse(atob(b64));
-        } catch { return null; }
+    function jwtPayload(t) {
+        try { return JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); }
+        catch { return null; }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -66,33 +73,37 @@
     // ═════════════════════════════════════════════════════════════════════════
 
     let myMentorships      = [];
-    let membershipsMembers = {};
+    let membershipsMembers = {};  // {mid: [{osu_user_id, osu_username, role}]}
     let menteeSet          = new Set();
     let initialized        = false;
     let myOsuId            = null;
-    let globalMode         = getGlobalMode();
+    let apiOnline          = null;  // null=unknown, true, false
+    let globalMode         = false; // effective current value (may be forced true when offline)
 
     // ═════════════════════════════════════════════════════════════════════════
     // API
     // ═════════════════════════════════════════════════════════════════════════
 
-    async function api(path, options = {}) {
+    async function api(path, opts = {}) {
         const token = getToken();
         const res = await fetch(`${API}${path}`, {
-            ...options,
+            ...opts,
             headers: {
                 'Content-Type': 'application/json',
                 ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                ...(options.headers || {}),
+                ...(opts.headers || {}),
             },
         });
         if (res.status === 401) { clearToken(); return null; }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
+        // DELETE returns {"ok":true}, others return JSON
+        const ct = res.headers.get('content-type') || '';
+        return ct.includes('json') ? res.json() : { ok: true };
     }
-    async function safeApi(path, opts={}) { try { return await api(path, opts); } catch { return null; } }
-    async function apiPost(path, body) { return api(path, { method:'POST', body: JSON.stringify(body) }); }
-    async function apiPatch(path, body) { return safeApi(path, { method:'PATCH', body: JSON.stringify(body) }); }
+    async function safeApi(path, opts = {}) { try { return await api(path, opts); } catch { return null; } }
+    async function apiPost(path, body)  { return api(path, { method:'POST',   body: JSON.stringify(body) }); }
+    async function apiPatch(path, body) { return safeApi(path, { method:'PATCH',  body: JSON.stringify(body) }); }
+    async function apiDel(path)         { return safeApi(path, { method:'DELETE' }); }
 
     // ═════════════════════════════════════════════════════════════════════════
     // PAGE UTILS
@@ -104,21 +115,15 @@
     const avatarUrl  = id => `https://a.ppy.sh/${id}`;
     const roleLabel  = r  => ({ lead_mentor:'Lead Mentor', mentor:'Mentor', mentee:'Mentee' }[r] || r);
 
-    // Get the osu! discussion ID (data-id on beatmap-discussion__discussion)
-    // and the post author ID (data-user-id in the top-user card).
-    // These are extracted from the OUTER .beatmap-discussion container.
     function getDiscussionInfo(el) {
         const inner = el.querySelector('.beatmap-discussion__discussion[data-id]');
         if (!inner) return null;
         const postId = parseInt(inner.dataset.id);
         if (!postId || isNaN(postId)) return null;
-
-        // Author is in beatmap-discussion__top-user, NOT inside the replies
         const authorLink = el.querySelector('.beatmap-discussion__top-user a[data-user-id]');
         if (!authorLink) return null;
         const authorId = parseInt(authorLink.dataset.userId);
         if (!authorId || isNaN(authorId)) return null;
-
         return { postId, authorId, inner };
     }
 
@@ -140,22 +145,42 @@
         if (token) {
             const p = jwtPayload(token);
             myOsuId = p ? parseInt(p.sub) : null;
+
             const ms = await safeApi('/mentorship/mine');
-            myMentorships = ms || [];
-            membershipsMembers = {};
-            menteeSet = new Set();
-            await Promise.all(myMentorships.map(async m => {
-                const members = await safeApi(`/mentorship/${m.id}/members`);
-                membershipsMembers[m.id] = members || [];
-                (members||[]).forEach(mem => { if (mem.role==='mentee') menteeSet.add(mem.osu_user_id); });
-            }));
+
+            if (ms !== null) {
+                // API is reachable
+                apiOnline = true;
+                myMentorships = ms;
+
+                membershipsMembers = {};
+                menteeSet = new Set();
+                await Promise.all(myMentorships.map(async m => {
+                    const members = await safeApi(`/mentorship/${m.id}/members`);
+                    membershipsMembers[m.id] = members || [];
+                    (members||[]).forEach(mem => { if (mem.role==='mentee') menteeSet.add(mem.osu_user_id); });
+                }));
+                cacheMentorships(myMentorships, membershipsMembers);
+
+                globalMode = getSavedGlobal();
+            } else {
+                // API unreachable — fall back to cache
+                apiOnline = false;
+                myMentorships = getCachedMs();
+                membershipsMembers = getCachedMembers();
+                menteeSet = new Set();
+                Object.values(membershipsMembers).forEach(members =>
+                    (members||[]).forEach(mem => { if (mem.role==='mentee') menteeSet.add(mem.osu_user_id); })
+                );
+                // Force global mode when offline (can't verify mentee membership)
+                globalMode = true;
+            }
         }
 
-        globalMode = getGlobalMode();
         initialized = true;
         injectTopPanel();
         scan();
-        if (getPending().length && getToken()) syncPending();
+        if (getPending().length && apiOnline) syncPending();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -168,19 +193,31 @@
         const panel = document.createElement('div');
         panel.id = TOP_ID;
 
-        // ── Controls row (always shown): position + global toggle ─────────────
+        const offlineBanner = apiOnline === false
+            ? `<div class="ms-offline-banner">
+                ⚠ API unreachable — offline mode active. Feedback is saved locally and will sync automatically when the connection is restored.
+                <button class="ms-link-btn ms-retry-btn">Retry</button>
+               </div>`
+            : '';
+
+        // Mentorship selector — hidden in global mode
+        const msSelector = (!globalMode && myMentorships.length > 1)
+            ? `<select class="ms-select ms-m-pick">${myMentorships.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>`
+            : (myMentorships.length === 1 ? `<strong class="ms-m-name">${esc(myMentorships[0].name)}</strong>` : '');
+
         const ctrlRow = `
             <div class="ms-top-ctrl-row">
-                <button class="ms-link-btn ms-pos-btn" title="Toggle panel position">📌 Move</button>
-                <label class="ms-form-label ms-global-wrap">
-                    <input type="checkbox" class="ms-global-chk" ${globalMode ? 'checked' : ''}/>
-                    Global mode <span class="ms-muted">(show on all mods)</span>
+                <button class="ms-link-btn ms-pos-btn" title="Cycle panel position">📌 Move</button>
+                <label class="ms-form-label ms-global-wrap" title="Show feedback panel under every mod post, not just mentee posts. Hides mentorship selector and visibility options.">
+                    <input type="checkbox" class="ms-global-chk" ${globalMode?'checked':''}/>
+                    Global mode
                 </label>
                 ${_pendingHtml()}
             </div>`;
 
         if (!getToken()) {
             panel.innerHTML = `<div class="ms-card ms-top-card">
+                ${offlineBanner}
                 <div class="ms-top-row">
                     <span class="ms-section-label">🎓 Mentorship</span>
                     <button class="ms-btn ms-btn-primary" id="ms-login-btn">Login with osu!</button>
@@ -192,33 +229,40 @@
 
         if (!myMentorships.length) {
             panel.innerHTML = `<div class="ms-card ms-top-card">
+                ${offlineBanner}
                 <div class="ms-top-row">
                     <span class="ms-section-label">🎓 Mentorship</span>
-                    <span class="ms-muted">Not a member of any mentorship</span>
+                    <span class="ms-muted">${apiOnline===false ? 'No cached mentorship data' : 'Not a member of any mentorship'}</span>
                 </div>${ctrlRow}</div>`;
             _bindTopCtrls(panel);
             return _insertTop(panel);
         }
 
         panel.innerHTML = `<div class="ms-card ms-top-card">
+            ${offlineBanner}
             <div class="ms-top-row">
                 <span class="ms-section-label">🎓 Mentorship</span>
-                ${myMentorships.length > 1
-                    ? `<select class="ms-select ms-m-pick">${myMentorships.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>`
-                    : `<strong class="ms-m-name">${esc(myMentorships[0].name)}</strong>`}
+                ${msSelector}
             </div>
             ${ctrlRow}
             <div class="ms-top-body"></div>
         </div>`;
 
         const sel    = panel.querySelector('.ms-m-pick');
-        const getMid = () => sel ? parseInt(sel.value) : myMentorships[0].id;
+        const getMid = () => sel ? parseInt(sel.value) : myMentorships[0]?.id;
 
         async function renderTop(mid) {
             const body = panel.querySelector('.ms-top-body');
+            if (!mid) { body.innerHTML=''; return; }
             body.innerHTML = '<span class="ms-muted">Loading…</span>';
             const bsid = getBsid();
-            const role = myMentorships.find(m => m.id===mid)?.my_role;
+            const role = myMentorships.find(m=>m.id===mid)?.my_role;
+
+            if (apiOnline === false) {
+                body.innerHTML = `<span class="ms-muted">OSZ and session info unavailable offline.</span>`;
+                return;
+            }
+
             const [fileInfo, session] = await Promise.all([
                 safeApi(`/files/beatmapset/${bsid}/info?mentorship_id=${mid}`),
                 safeApi(`/beatmapset/${bsid}/session?mentorship_id=${mid}`),
@@ -232,8 +276,7 @@
                 const mb = (fileInfo.file_size_bytes/1024/1024).toFixed(1);
                 const dt = new Date(fileInfo.uploaded_at).toLocaleDateString();
                 oszRow.innerHTML = `<span>📦</span>
-                    <button class="ms-link-btn ms-dl-btn"
-                        data-mid="${mid}" data-bsid="${bsid}" data-fn="${esc(fileInfo.filename)}">
+                    <button class="ms-link-btn ms-dl-btn" data-mid="${mid}" data-bsid="${bsid}" data-fn="${esc(fileInfo.filename)}">
                         ${esc(fileInfo.filename)} <span class="ms-muted">${mb} MB · submitted ${dt}</span>
                     </button>`;
                 oszRow.querySelector('.ms-dl-btn').addEventListener('click', async e => {
@@ -242,7 +285,7 @@
                     await downloadOsz(+b.dataset.bsid, +b.dataset.mid, b.dataset.fn);
                     b.innerHTML=orig;
                 });
-            } else if (role === 'mentee') {
+            } else if (role==='mentee') {
                 oszRow.innerHTML = `<span>📦</span>
                     <span class="ms-muted">No .osz submitted yet</span>
                     <input class="ms-input ms-url-in" placeholder="Paste download URL (catbox.moe etc.)…"/>
@@ -257,9 +300,7 @@
                     fd.append('mentorship_id',mid); fd.append('beatmapset_id',bsid); fd.append('url',url);
                     try {
                         const r=await fetch(`${API}/files/beatmapset/from-url`,{
-                            method:'POST',
-                            headers: getToken()?{Authorization:`Bearer ${getToken()}`}:{},
-                            body:fd,
+                            method:'POST', headers:getToken()?{Authorization:`Bearer ${getToken()}`}:{}, body:fd,
                         });
                         if (r.ok) return renderTop(mid);
                         btn.textContent=`Failed (${r.status}) — retry`;
@@ -271,7 +312,7 @@
             }
             body.appendChild(oszRow);
 
-            // ── Session row ───────────────────────────────────────────────────
+            // ── Session / reviewed row ────────────────────────────────────────
             let menteeId = session?.mentee_osu_id ?? null;
             if (!menteeId && role!=='mentee') {
                 const mentees=(membershipsMembers[mid]||[]).filter(m=>m.role==='mentee');
@@ -282,7 +323,7 @@
             const sessRow=document.createElement('div');
             sessRow.className='ms-sess-row';
 
-            function renderSess(isRev,revAt) {
+            function renderSess(isRev, revAt) {
                 sessRow.innerHTML='';
                 if (isRev) {
                     const d=revAt?new Date(revAt).toLocaleDateString():'?';
@@ -293,7 +334,10 @@
                     if (role==='lead_mentor'&&menteeId) {
                         sessRow.appendChild(_btn('Undo','ms-btn ms-btn-ghost ms-btn-sm', async b=>{
                             b.disabled=true;
-                            const r=await apiPatch(`/beatmapset/${bsid}/session?mentorship_id=${mid}&mentee_osu_id=${menteeId}`,{is_discussed:false});
+                            const r=await apiPatch(
+                                `/beatmapset/${bsid}/session?mentorship_id=${mid}&mentee_osu_id=${menteeId}`,
+                                {is_discussed:false}
+                            );
                             if(r){renderSess(false,null);_broadcastSession(mid,false);}else b.disabled=false;
                         }));
                     }
@@ -305,7 +349,10 @@
                             sessRow.innerHTML=`<span class="ms-muted">Mentee: <strong>${esc(session.mentee_username)}</strong></span> `;
                         sessRow.appendChild(_btn('✓ Mark as Reviewed','ms-btn ms-btn-primary ms-btn-sm', async b=>{
                             b.disabled=true; b.textContent='Saving…';
-                            const r=await apiPatch(`/beatmapset/${bsid}/session?mentorship_id=${mid}&mentee_osu_id=${menteeId}`,{is_discussed:true});
+                            const r=await apiPatch(
+                                `/beatmapset/${bsid}/session?mentorship_id=${mid}&mentee_osu_id=${menteeId}`,
+                                {is_discussed:true}
+                            );
                             if(r){renderSess(true,new Date().toISOString());_broadcastSession(mid,true);}
                             else{b.disabled=false;b.textContent='✓ Mark as Reviewed';}
                         }));
@@ -316,51 +363,49 @@
             }
             renderSess(session?.is_discussed??false, session?.discussed_at);
             body.appendChild(sessRow);
+
+            // Export button (all loaded feedback for this page)
+            const expBtn=_btn('Export feedback (this page)','ms-link-btn ms-export-page-btn', ()=>exportAll(bsid));
+            expBtn.style.marginTop='6px';
+            body.appendChild(expBtn);
         }
 
         if (sel) sel.addEventListener('change', ()=>renderTop(getMid()));
         _bindTopCtrls(panel);
-        renderTop(getMid());
+        if (myMentorships.length) renderTop(getMid());
         _insertTop(panel);
     }
 
-    // ── Top panel position ────────────────────────────────────────────────────
-    // pos '1': between beatmap-discussions-header-bottom and the discussions page
-    // pos '2': after the beatmap-discussion-new-float (New Discussion form)
-
     function _insertTop(panel) {
         const pos = getPanelPos();
-        let ref = null;
-        if (pos === '2') {
-            ref = document.querySelector('.beatmap-discussion-new-float');
-            if (ref) { ref.insertAdjacentElement('afterend', panel); return; }
+        if (pos==='2') {
+            const ref=document.querySelector('.beatmap-discussion-new-float');
+            if (ref){ ref.insertAdjacentElement('afterend',panel); return; }
         }
-        // Default / pos '1': after the osu-page--small that holds the header-bottom
-        const headerBottom = document.querySelector('.beatmap-discussions-header-bottom');
-        ref = headerBottom?.closest('.osu-page');
-        if (ref) { ref.insertAdjacentElement('afterend', panel); return; }
-        // Fallback
-        const discussions = document.querySelector('.beatmap-discussions');
-        if (discussions) { discussions.insertAdjacentElement('beforebegin', panel); return; }
-        document.body.insertBefore(panel, document.body.firstChild);
+        const hb=document.querySelector('.beatmap-discussions-header-bottom');
+        const ref=hb?.closest('.osu-page');
+        if (ref){ ref.insertAdjacentElement('afterend',panel); return; }
+        const disc=document.querySelector('.beatmap-discussions');
+        if (disc){ disc.insertAdjacentElement('beforebegin',panel); return; }
+        document.body.insertBefore(panel,document.body.firstChild);
     }
 
     function _bindTopCtrls(root) {
-        // Position toggle
-        root.querySelector('.ms-pos-btn')?.addEventListener('click', () => {
-            const next = getPanelPos()==='1' ? '2' : '1';
-            setPanelPos(next);
-            injectTopPanel();   // re-inject at new position
+        root.querySelector('.ms-pos-btn')?.addEventListener('click', ()=>{
+            setPanelPos(getPanelPos()==='1'?'2':'1');
+            injectTopPanel();
         });
-        // Global mode toggle
-        const chk = root.querySelector('.ms-global-chk');
+        root.querySelector('.ms-retry-btn')?.addEventListener('click', init);
+        const chk=root.querySelector('.ms-global-chk');
         if (chk) {
-            chk.addEventListener('change', () => {
-                globalMode = chk.checked;
-                setGlobalMode(globalMode);
-                // Re-run scan with new mode
-                document.querySelectorAll(`[${ATTR}]`).forEach(el => {
-                    el.querySelectorAll('.ms-panel').forEach(p => p.remove());
+            chk.addEventListener('change', ()=>{
+                globalMode=chk.checked;
+                setSavedGlobal(globalMode);
+                // Re-render top panel to show/hide mentorship selector
+                injectTopPanel();
+                // Re-scan to add/remove per-post panels
+                document.querySelectorAll(`[${ATTR}]`).forEach(el=>{
+                    el.querySelectorAll('.ms-panel').forEach(p=>p.remove());
                     el.removeAttribute(ATTR);
                 });
                 scan();
@@ -370,7 +415,7 @@
     }
 
     function _broadcastSession(mid, isRev) {
-        document.querySelectorAll(`.ms-panel[data-mid="${mid}"]`).forEach(p =>
+        document.querySelectorAll(`.ms-panel[data-mid="${mid}"]`).forEach(p=>
             p.dispatchEvent(new CustomEvent('ms:session',{detail:{is_discussed:isRev}}))
         );
     }
@@ -383,7 +428,7 @@
         const n=getPending().length;
         if (!n) return '';
         return `<span class="ms-pending-badge" id="ms-pending-badge">⚠ ${n} unsent
-            <button class="ms-link-btn ms-sync-btn">Retry</button>
+            <button class="ms-link-btn ms-sync-btn">Sync</button>
             <button class="ms-link-btn ms-export-btn">Export .txt</button></span>`;
     }
     function _refreshPendingBadge() {
@@ -392,16 +437,17 @@
         const n=getPending().length;
         if (!n){badge.remove();return;}
         badge.innerHTML=`⚠ ${n} unsent
-            <button class="ms-link-btn ms-sync-btn">Retry</button>
+            <button class="ms-link-btn ms-sync-btn">Sync</button>
             <button class="ms-link-btn ms-export-btn">Export .txt</button>`;
         _bindPending(badge.closest('#ms-top-panel')||document);
     }
     function _bindPending(root) {
         root.querySelector('.ms-sync-btn')?.addEventListener('click', syncPending);
-        root.querySelector('.ms-export-btn')?.addEventListener('click', exportPending);
+        root.querySelector('.ms-export-btn')?.addEventListener('click', ()=>exportAll(getBsid()));
     }
 
     async function syncPending() {
+        if (!getToken()) return;
         let synced=0;
         for (const e of [...getPending()]) {
             try {
@@ -414,6 +460,7 @@
             } catch {}
         }
         if (synced) {
+            // Reload any open panels
             document.querySelectorAll('.ms-panel-body[data-loaded]').forEach(b=>{
                 b.removeAttribute('data-loaded');
                 if(b.style.display!=='none') b.innerHTML='<span class="ms-muted">Refreshing…</span>';
@@ -421,76 +468,177 @@
         }
     }
 
-    function exportPending() {
-        const list=getPending();
-        if (!list.length){alert('No unsent feedback to export.');return;}
-        const lines=['osu! Mentorship — Unsent Feedback Export',
-            `Generated: ${new Date().toLocaleString()}`,`Count: ${list.length}`,'═'.repeat(60)];
-        list.forEach((e,i)=>{
-            lines.push('',`[${i+1}] Post #${e.postId}  •  Beatmapset #${e.beatmapsetId}`,
-                `Mentorship ID : ${e.mentorshipId}`,
-                `Role          : ${e.authorRole||'?'}`,
-                `Visibility    : ${e.visibility==='immediate'?'Visible now':'Hold until reviewed'}`,
-                `Anonymous     : ${e.isAnonymous?'Yes':'No'}`,
-                `Global mode   : ${e.isGlobal?'Yes':'No'}`,
-                `Date          : ${new Date(e.createdAt).toLocaleString()}`,
-                '─'.repeat(40),e.content);
-        });
+    function exportAll(bsid) {
+        const lines=[
+            'osu! Mentorship — Feedback Export',
+            `Beatmapset: https://osu.ppy.sh/beatmapsets/${bsid}/discussion`,
+            `Generated : ${new Date().toLocaleString()}`,
+            '═'.repeat(70),
+        ];
+
+        // Server-loaded feedback grouped by post
+        if (loadedFeedback.size) {
+            lines.push('','── Stored Feedback ──');
+            for (const [key, entries] of loadedFeedback) {
+                if (!entries.length) continue;
+                const postId=key.split('-')[1];
+                lines.push('',
+                    `Post #${postId}`,
+                    `Permalink: https://osu.ppy.sh/beatmapsets/${bsid}/discussion/-/generalAll#/${postId}`,
+                    '─'.repeat(50)
+                );
+                entries.forEach(e=>{
+                    const name=e.is_anonymous?`Anonymous ${roleLabel(e.author_role)}`:(e.author_username||`user#${e.author_osu_id}`);
+                    lines.push(`  [${roleLabel(e.author_role)}] ${name}`);
+                    lines.push(`  ${new Date(e.created_at).toLocaleString()}`);
+                    lines.push(`  ${e.content}`,'');
+                });
+            }
+        }
+
+        // Pending offline entries
+        const pending=getPending();
+        if (pending.length) {
+            lines.push('','── Unsent (offline) Feedback ──');
+            pending.forEach((e,i)=>{
+                lines.push('',
+                    `[UNSENT ${i+1}] Post #${e.postId}`,
+                    `Permalink: https://osu.ppy.sh/beatmapsets/${e.beatmapsetId}/discussion/-/generalAll#/${e.postId}`,
+                    `Role      : ${e.authorRole||'?'}`,
+                    `Visibility: ${e.visibility==='immediate'?'Visible now':'Hold until reviewed'}`,
+                    `Anonymous : ${e.isAnonymous?'Yes':'No'}`,
+                    `Date      : ${new Date(e.createdAt).toLocaleString()}`,
+                    '─'.repeat(50),
+                    `  ${e.content}`,''
+                );
+            });
+        }
+
+        if (lines.length<=4) { alert('No feedback to export yet — open some posts first.'); return; }
         const url=URL.createObjectURL(new Blob([lines.join('\n')],{type:'text/plain;charset=utf-8'}));
-        Object.assign(document.createElement('a'),{href:url,download:`mentorship-feedback-${Date.now()}.txt`}).click();
+        Object.assign(document.createElement('a'),{href:url,download:`mentorship-${bsid}-${Date.now()}.txt`}).click();
         setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // BADGE SYSTEM
+    // Priority: OP > Lead Mentor > Mentor > Mentee
+    // Show highest badge; hide extras behind (+n) expander with tooltips.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function getBadges(entry, menteeOsuId) {
+        const badges=[];
+
+        // OP — only when not anonymous and the feedback author IS the mod author
+        if (!entry.is_anonymous && entry.author_osu_id===menteeOsuId) {
+            badges.push({
+                label:'OP',
+                cls:'ms-badge-op',
+                tip:'Original Poster — this person posted this mod themselves',
+            });
+        }
+
+        // Role badge with mentorship tooltip
+        const rLabel=roleLabel(entry.author_role);
+        const msNames=myMentorships
+            .filter(m=>(membershipsMembers[m.id]||[]).some(mem=>
+                mem.osu_user_id===entry.author_osu_id && mem.role===entry.author_role
+            ))
+            .map(m=>m.name);
+        badges.push({
+            label:rLabel,
+            cls:`ms-role-chip ms-role-chip-${entry.author_role}`,
+            tip:msNames.length ? `${rLabel} in: ${msNames.join(', ')}` : rLabel,
+        });
+
+        // Priority ordering: OP always comes first (already prepended above).
+        // Within role the existing ordering is correct.
+        return badges;
+    }
+
+    function renderBadges(badges) {
+        const el=document.createElement('span');
+        el.className='ms-badges';
+        if (!badges.length) return el;
+
+        const primary=badges[0];
+        const extras=badges.slice(1);
+
+        const primaryEl=document.createElement('span');
+        primaryEl.className=primary.cls;
+        primaryEl.textContent=primary.label;
+        primaryEl.title=primary.tip;
+        el.appendChild(primaryEl);
+
+        if (extras.length) {
+            const more=document.createElement('span');
+            more.className='ms-badge-more';
+
+            const btn=document.createElement('span');
+            btn.className='ms-badge-more-btn';
+            btn.textContent=`+${extras.length}`;
+            more.appendChild(btn);
+
+            const list=document.createElement('span');
+            list.className='ms-badge-more-list';
+            extras.forEach(b=>{
+                const s=document.createElement('span');
+                s.className=b.cls;
+                s.textContent=b.label;
+                s.title=b.tip;
+                list.appendChild(s);
+            });
+            more.appendChild(list);
+
+            more.addEventListener('click', e=>{
+                e.stopPropagation();
+                more.classList.toggle('ms-badge-more--open');
+            });
+            el.appendChild(more);
+        }
+        return el;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     // SCAN
     // ═════════════════════════════════════════════════════════════════════════
-    // Scans .beatmap-discussion outer containers (not the inner post divs).
-    // Author is extracted from .beatmap-discussion__top-user a[data-user-id].
-    // Post ID is extracted from .beatmap-discussion__discussion[data-id].
 
     function scan() {
         if (!initialized||!isDiscPage()) return;
         const bsid=getBsid();
         if (!bsid) return;
 
-        document.querySelectorAll(`.beatmap-discussion:not([${ATTR}])`).forEach(el => {
-            const info = getDiscussionInfo(el);
+        document.querySelectorAll(`.beatmap-discussion:not([${ATTR}])`).forEach(el=>{
+            const info=getDiscussionInfo(el);
             if (!info) return;
-            const {postId, authorId, inner} = info;
+            const {postId,authorId,inner}=info;
 
-            const isMenteePost = menteeSet.has(authorId);
+            const isMenteePost=menteeSet.has(authorId);
+            if (!globalMode&&!isMenteePost) return;
 
-            // Decide whether to show panel
-            if (!globalMode && !isMenteePost) return;
-
-            // Build mentorship list for this panel
             let relevant;
-            if (isMenteePost) {
-                relevant = myMentorships.filter(m =>
+            if (isMenteePost&&!globalMode) {
+                relevant=myMentorships.filter(m=>
                     (membershipsMembers[m.id]||[]).some(mem=>mem.osu_user_id===authorId&&mem.role==='mentee')
                 );
             } else {
-                // Global mode, non-mentee post: show panel for all mentorships
-                relevant = myMentorships;
+                relevant=myMentorships;
             }
             if (!relevant.length) return;
 
             el.setAttribute(ATTR,'1');
-            const panel = buildPanel(postId, bsid, authorId, relevant, !isMenteePost);
-
-            // Inject before the bottom line, inside the discussion container
-            const line = inner.querySelector('.beatmap-discussion__line');
-            if (line) inner.insertBefore(panel, line);
+            const panel=buildPanel(postId,bsid,authorId,relevant,!isMenteePost||globalMode);
+            const line=inner.querySelector('.beatmap-discussion__line');
+            if (line) inner.insertBefore(panel,line);
             else inner.appendChild(panel);
         });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // FEEDBACK PANEL
+    // PER-POST FEEDBACK PANEL
     // ═════════════════════════════════════════════════════════════════════════
 
-    // isGlobal = true when the post author is NOT a registered mentee (global mode)
-    function buildPanel(postId, bsid, menteeOsuId, mentorships, isGlobal=false) {
+    function buildPanel(postId,bsid,menteeOsuId,mentorships,isGlobal) {
         const panel=document.createElement('div');
         panel.className='ms-panel';
         panel.dataset.mid=mentorships[0].id;
@@ -499,11 +647,14 @@
         header.className='ms-panel-header';
         header.innerHTML=`<span class="ms-panel-label">🎓 Feedback${isGlobal?' <span class="ms-global-tag">global</span>':''}</span>`;
 
+        // In global mode: no mentorship selector (use first mentorship silently)
         let selEl=null;
-        if (mentorships.length>1) {
+        if (!isGlobal && mentorships.length>1) {
             selEl=document.createElement('select');
             selEl.className='ms-select ms-select-sm';
-            mentorships.forEach(m=>{const o=document.createElement('option');o.value=m.id;o.textContent=m.name;selEl.appendChild(o);});
+            mentorships.forEach(m=>{
+                const o=document.createElement('option');o.value=m.id;o.textContent=m.name;selEl.appendChild(o);
+            });
             header.appendChild(selEl);
         }
         header.innerHTML+=`<span class="ms-chevron">▼</span>`;
@@ -519,12 +670,23 @@
             if(loadedMid===mid&&!force) return;
             loadedMid=mid;
             body.innerHTML='<span class="ms-muted">Loading…</span>';
-            const [session, feedback]=await Promise.all([
+
+            if (apiOnline===false) {
+                // Offline: show only pending entries, no API calls
+                body.dataset.loaded='1';
+                renderBody(body,mid,postId,bsid,menteeOsuId,[],false,isGlobal);
+                return;
+            }
+
+            const [session,feedback]=await Promise.all([
                 safeApi(`/beatmapset/${bsid}/session?mentorship_id=${mid}&mentee_osu_id=${menteeOsuId}`),
                 safeApi(`/feedback/${postId}?mentorship_id=${mid}&mentee_osu_id=${menteeOsuId}`),
             ]);
             body.dataset.loaded='1';
-            renderBody(body, mid, postId, bsid, menteeOsuId, feedback||[], session?.is_discussed??false, isGlobal);
+            const entries=feedback||[];
+            // Cache for export
+            loadedFeedback.set(`${mid}-${postId}`, entries);
+            renderBody(body,mid,postId,bsid,menteeOsuId,entries,session?.is_discussed??false,isGlobal);
         }
 
         header.addEventListener('click', e=>{
@@ -542,28 +704,38 @@
         return panel;
     }
 
-    function renderBody(container, mid, postId, bsid, menteeOsuId, entries, isReviewed, isGlobal) {
+    function renderBody(container,mid,postId,bsid,menteeOsuId,entries,isReviewed,isGlobal) {
         container.innerHTML='';
         const myRole  =myMentorships.find(m=>m.id===mid)?.my_role;
         const isMentee=myRole==='mentee';
         const isMentor=myRole==='mentor'||myRole==='lead_mentor';
 
-        const pending=getPending().filter(e=>e.postId===postId&&e.mentorshipId===mid);
+        // Offline notice
+        if (apiOnline===false) {
+            const n=document.createElement('div');n.className='ms-offline-notice';
+            n.textContent='⚠ Offline — showing locally saved entries only.';
+            container.appendChild(n);
+        }
 
         if (isMentee&&!isReviewed&&!isGlobal) {
-            const n=document.createElement('div');
-            n.className='ms-notice';
+            const n=document.createElement('div');n.className='ms-notice';
             n.textContent='Mentor feedback is hidden until this map is marked as reviewed.';
             container.appendChild(n);
         }
 
-        const all=[...entries,...pending.map(e=>({
-            _pending:true, localId:e.localId,
-            author_osu_id:myOsuId, author_username:null,
-            author_role:e.authorRole, content:e.content,
-            visibility:e.visibility, is_anonymous:e.isAnonymous,
-            created_at:e.createdAt,
-        }))];
+        // Pending entries for this post
+        const pending=getPending().filter(e=>e.postId===postId&&e.mentorshipId===mid);
+
+        const all=[
+            ...entries,
+            ...pending.map(e=>({
+                _pending:true,localId:e.localId,
+                author_osu_id:myOsuId,author_username:null,
+                author_role:e.authorRole,content:e.content,
+                visibility:e.visibility,is_anonymous:e.isAnonymous,
+                created_at:e.createdAt,
+            })),
+        ];
 
         if (!all.length) {
             const p=document.createElement('p');p.className='ms-empty';p.textContent='No feedback yet.';
@@ -573,24 +745,98 @@
         all.forEach(entry=>{
             const item=document.createElement('div');
             item.className=`ms-entry ms-role-${entry.author_role}${entry._pending?' ms-entry-pending':''}`;
-            const name=entry.is_anonymous?`Anonymous ${roleLabel(entry.author_role)}`:(entry.author_username||`user#${entry.author_osu_id}`);
+
+            const name=entry.is_anonymous
+                ?`Anonymous ${roleLabel(entry.author_role)}`
+                :(entry.author_username||`user#${entry.author_osu_id}`);
             const date=new Date(entry.created_at).toLocaleDateString();
             const visNote=(!isReviewed&&entry.visibility==='immediate')?' · Visible now':'';
+
             const avatar=(!entry.is_anonymous&&entry.author_osu_id)
                 ?`<img class="ms-avatar" src="${avatarUrl(entry.author_osu_id)}" alt=""/>`
                 :`<div class="ms-avatar ms-avatar-anon">?</div>`;
-            item.innerHTML=`
-                <div class="ms-entry-head">${avatar}
-                    <div class="ms-entry-meta">
-                        <span class="ms-entry-name">${esc(name)}</span>
-                        <span class="ms-role-chip ms-role-chip-${entry.author_role}">${roleLabel(entry.author_role)}</span>
-                        <span class="ms-muted">${date}${visNote}</span>
-                        ${entry._pending?'<span class="ms-pending-tag">⏳ unsent</span>':''}
-                    </div>
-                </div>
-                <div class="ms-entry-body">${esc(entry.content)}</div>`;
+
+            const nameEl=document.createElement('span');
+            nameEl.className='ms-entry-name';nameEl.textContent=name;
+
+            const metaEl=document.createElement('div');
+            metaEl.className='ms-entry-meta';
+            metaEl.appendChild(nameEl);
+
+            // Badges
+            const badges=getBadges(entry,menteeOsuId);
+            metaEl.appendChild(renderBadges(badges));
+
+            const dateEl=document.createElement('span');
+            dateEl.className='ms-muted';dateEl.textContent=date+visNote;
+            metaEl.appendChild(dateEl);
+
             if (entry._pending) {
-                const rb=_btn('Retry','ms-link-btn',async b=>{
+                const tag=document.createElement('span');tag.className='ms-pending-tag';tag.textContent='⏳ unsent';
+                metaEl.appendChild(tag);
+            }
+
+            const headEl=document.createElement('div');
+            headEl.className='ms-entry-head';
+            headEl.innerHTML=avatar;
+            headEl.appendChild(metaEl);
+
+            const bodyEl=document.createElement('div');
+            bodyEl.className='ms-entry-body';bodyEl.textContent=entry.content;
+
+            item.appendChild(headEl);
+            item.appendChild(bodyEl);
+
+            // ── Edit / Delete for own entries ─────────────────────────────────
+            // For pending entries use localId check; for server entries use author_osu_id
+            const isOwn=entry._pending
+                ? true  // always own (we created it)
+                : (entry.author_osu_id===myOsuId);
+
+            if (isOwn&&!entry._pending) {
+                const actions=document.createElement('div');
+                actions.className='ms-entry-actions';
+
+                // Edit button
+                actions.appendChild(_btn('Edit','ms-link-btn',()=>{
+                    // Replace body with inline editor
+                    const ta=document.createElement('textarea');
+                    ta.className='ms-textarea ms-edit-ta';ta.value=entry.content;
+                    bodyEl.replaceWith(ta);ta.focus();
+                    actions.innerHTML='';
+                    actions.appendChild(_btn('Save','ms-link-btn',async b=>{
+                        const newContent=ta.value.trim();if(!newContent)return;
+                        b.textContent='Saving…';
+                        const r=await apiPatch(`/feedback/${entry.id}`,{content:newContent});
+                        if(r){entry.content=newContent;renderBody(container,mid,postId,bsid,menteeOsuId,entries,isReviewed,isGlobal);}
+                        else b.textContent='Save';
+                    }));
+                    actions.appendChild(_btn('Cancel','ms-link-btn',()=>{
+                        renderBody(container,mid,postId,bsid,menteeOsuId,entries,isReviewed,isGlobal);
+                    }));
+                }));
+
+                // Delete button
+                actions.appendChild(_btn('Delete','ms-link-btn ms-del-btn',async b=>{
+                    if(!confirm('Delete this feedback? This cannot be undone.'))return;
+                    b.textContent='Deleting…';
+                    const r=await apiDel(`/feedback/${entry.id}`);
+                    if(r){
+                        const idx=entries.findIndex(e=>e.id===entry.id);
+                        if(idx!==-1)entries.splice(idx,1);
+                        // Update export cache
+                        loadedFeedback.set(`${mid}-${postId}`,[...entries]);
+                        renderBody(container,mid,postId,bsid,menteeOsuId,entries,isReviewed,isGlobal);
+                    } else b.textContent='Delete';
+                }));
+
+                item.appendChild(actions);
+            }
+
+            // Pending entry retry
+            if (entry._pending) {
+                const actions=document.createElement('div');actions.className='ms-entry-actions';
+                actions.appendChild(_btn('Retry','ms-link-btn',async b=>{
                     b.textContent='Retrying…';
                     try {
                         const r=await apiPost(`/feedback/${postId}`,{
@@ -600,26 +846,25 @@
                         if(r){removePending(entry.localId);entries.push(r);renderBody(container,mid,postId,bsid,menteeOsuId,entries,isReviewed,isGlobal);}
                         else b.textContent='Retry';
                     } catch{b.textContent='Retry';}
-                });
-                item.querySelector('.ms-entry-meta').appendChild(rb);
+                }));
+                item.appendChild(actions);
             }
+
             container.appendChild(item);
         });
 
-        // ── Form ──────────────────────────────────────────────────────────────
-        const form=document.createElement('div');
-        form.className='ms-form';
+        // ── Feedback form ─────────────────────────────────────────────────────
+        const form=document.createElement('div');form.className='ms-form';
         const ta=document.createElement('textarea');
-        ta.className='ms-textarea'; ta.placeholder='Write your feedback…';
+        ta.className='ms-textarea';ta.placeholder='Write your feedback…';
         form.appendChild(ta);
-        const row=document.createElement('div');
-        row.className='ms-form-row';
+
+        const row=document.createElement('div');row.className='ms-form-row';
 
         // Visibility selector:
-        // - In global mode: always immediate (no session to hide behind)
-        // - Not yet reviewed: show for all roles
-        //   · mentors default to "Hold until reviewed"
-        //   · mentees default to "Visible now"
+        //   - Hidden in global mode (always immediate)
+        //   - Hidden once reviewed (irrelevant)
+        //   - Mentors default "Hold until reviewed"; mentees default "Visible now"
         if (!isGlobal && !isReviewed) {
             row.innerHTML=`<label class="ms-form-label">
                 <select class="ms-select ms-vis-sel">
@@ -631,19 +876,20 @@
                 </select></label>`;
         }
 
-        if (isMentor) {
+        // Anonymous — mentors only, and NOT in global mode
+        if (isMentor && !isGlobal) {
             row.innerHTML+=`<label class="ms-form-label">
                 <input type="checkbox" class="ms-anon-chk"/> Anonymous</label>`;
         }
 
-        const submitBtn=_btn('Post','ms-btn ms-btn-primary ms-btn-submit', async b=>{
+        const submitBtn=_btn('Post','ms-btn ms-btn-primary ms-btn-submit',async b=>{
             const content=ta.value.trim();
-            if(!content) return;
-            b.disabled=true; b.textContent='Posting…';
-            // Global mode always sends as immediate (no review session)
+            if(!content)return;
+            b.disabled=true;b.textContent='Posting…';
             const visibility=isGlobal?'immediate':(form.querySelector('.ms-vis-sel')?.value??(isMentor?'after_discussed':'immediate'));
-            const isAnon=form.querySelector('.ms-anon-chk')?.checked??false;
+            const isAnon=(!isGlobal)&&(form.querySelector('.ms-anon-chk')?.checked??false);
             const payload={mentorship_id:mid,beatmapset_id:bsid,mentee_osu_id:menteeOsuId,content,visibility,is_anonymous:isAnon};
+
             let result=null;
             try { result=await apiPost(`/feedback/${postId}`,payload); }
             catch {
@@ -653,8 +899,12 @@
                 renderBody(container,mid,postId,bsid,menteeOsuId,entries,isReviewed,isGlobal);
                 return;
             }
-            if(result){ta.value='';entries.push(result);renderBody(container,mid,postId,bsid,menteeOsuId,entries,isReviewed,isGlobal);}
-            else{b.disabled=false;b.textContent='Post';}
+            if(result){
+                ta.value='';
+                entries.push(result);
+                loadedFeedback.set(`${mid}-${postId}`,[...entries]);
+                renderBody(container,mid,postId,bsid,menteeOsuId,entries,isReviewed,isGlobal);
+            } else{b.disabled=false;b.textContent='Post';}
         });
         row.appendChild(submitBtn);
         form.appendChild(row);
@@ -669,7 +919,7 @@
         try {
             const res=await fetch(`${API}/files/beatmapset/${bsid}/download?mentorship_id=${mid}`,
                 {headers:getToken()?{Authorization:`Bearer ${getToken()}`}:{}});
-            if(!res.ok) throw new Error(`HTTP ${res.status}`);
+            if(!res.ok)throw new Error(`HTTP ${res.status}`);
             const url=URL.createObjectURL(await res.blob());
             Object.assign(document.createElement('a'),{href:url,download:filename}).click();
             setTimeout(()=>URL.revokeObjectURL(url),1500);
@@ -682,10 +932,10 @@
 
     function openLoginPopup() {
         const p=window.open(`${API}/auth/userscript-login`,'ms-auth','width=520,height=680,left=400,top=80');
-        if(!p) alert('Allow popups for osu.ppy.sh to use the mentorship tool.');
+        if(!p)alert('Allow popups for osu.ppy.sh to use the mentorship tool.');
     }
     window.addEventListener('message',e=>{
-        if(e.origin!==API) return;
+        if(e.origin!==API)return;
         if(e.data?.type==='osu-mentorship-auth'&&e.data.token){setToken(e.data.token);init();}
     });
 
@@ -694,29 +944,30 @@
     // ═════════════════════════════════════════════════════════════════════════
 
     let _lastPath=location.pathname;
-    function _handleNav() {
-        if(location.pathname===_lastPath) return;
+    function _handleNav(){
+        if(location.pathname===_lastPath)return;
         _lastPath=location.pathname;
-        if(isDiscPage()) setTimeout(init,800);
+        if(isDiscPage())setTimeout(init,800);
     }
     const _origPush=history.pushState.bind(history);
     const _origRepl=history.replaceState.bind(history);
-    history.pushState    =(...a)=>{_origPush(...a);    _handleNav();};
+    history.pushState    =(...a)=>{_origPush(...a);   _handleNav();};
     history.replaceState =(...a)=>{_origRepl(...a); _handleNav();};
     window.addEventListener('popstate',_handleNav);
     new MutationObserver(_handleNav).observe(
         document.querySelector('title')||document.documentElement,
         {childList:true,subtree:true,characterData:true}
     );
-    new MutationObserver(()=>{if(initialized)scan();}).observe(document.body,{childList:true,subtree:true});
+    new MutationObserver(()=>{if(initialized)scan();})
+        .observe(document.body,{childList:true,subtree:true});
 
     // ═════════════════════════════════════════════════════════════════════════
     // UTIL
     // ═════════════════════════════════════════════════════════════════════════
 
-    function _btn(text,cls,onClick) {
+    function _btn(text,cls,onClick){
         const b=document.createElement('button');
-        b.className=cls; b.textContent=text;
+        b.className=cls;b.textContent=text;
         b.addEventListener('click',()=>onClick(b));
         return b;
     }
@@ -725,16 +976,15 @@
     // STYLES
     // ═════════════════════════════════════════════════════════════════════════
 
-    function injectStyles() {
-        if(document.getElementById('ms-styles')) return;
-        const s=document.createElement('style');
-        s.id='ms-styles';
+    function injectStyles(){
+        if(document.getElementById('ms-styles'))return;
+        const s=document.createElement('style');s.id='ms-styles';
         s.textContent=`
         #ms-top-panel{margin:10px 0 14px}
         .ms-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:10px 14px;font-size:12px;color:#ddd}
         .ms-top-card{display:flex;flex-direction:column;gap:8px}
         .ms-top-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-        .ms-top-ctrl-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:4px;border-top:1px solid rgba(255,255,255,.06)}
+        .ms-top-ctrl-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:5px;border-top:1px solid rgba(255,255,255,.06)}
         .ms-top-body{display:flex;flex-direction:column;gap:7px}
         .ms-section-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;font-weight:700;color:rgba(255,255,255,.4)}
         .ms-m-name{color:rgba(255,255,255,.75);font-size:12px}
@@ -743,11 +993,13 @@
         .ms-osz-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
         .ms-sess-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
         .ms-badge-reviewed{display:inline-flex;align-items:center;padding:2px 10px;background:rgba(75,210,143,.15);color:#4bd28f;border-radius:10px;font-size:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+        .ms-offline-banner{padding:7px 10px;background:rgba(240,100,60,.1);border:1px solid rgba(240,100,60,.3);border-radius:5px;color:rgba(255,140,100,.9);font-size:11px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+        .ms-offline-notice{padding:4px 8px;background:rgba(240,100,60,.08);border-left:3px solid rgba(240,100,60,.4);color:rgba(255,140,100,.8);font-size:11px;margin-bottom:6px;border-radius:2px}
         .ms-panel{margin-top:6px;border-top:1px solid rgba(255,255,255,.06);padding-top:6px;font-size:12px}
         .ms-panel-header{display:flex;align-items:center;gap:8px;cursor:pointer;color:rgba(255,255,255,.38);user-select:none}
         .ms-panel-header:hover{color:rgba(255,255,255,.75)}
         .ms-panel-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
-        .ms-global-tag{font-size:9px;background:rgba(255,200,0,.2);color:#f0c040;padding:1px 5px;border-radius:4px;vertical-align:middle;margin-left:3px;letter-spacing:.03em}
+        .ms-global-tag{font-size:9px;background:rgba(255,200,0,.2);color:#f0c040;padding:1px 5px;border-radius:4px;vertical-align:middle;margin-left:3px}
         .ms-chevron{margin-left:auto;font-size:9px;pointer-events:none}
         .ms-panel-body{margin-top:8px}
         .ms-entry{padding:7px 9px;margin-bottom:5px;background:rgba(255,255,255,.04);border-radius:4px;border-left:3px solid rgba(255,255,255,.1)}
@@ -755,15 +1007,27 @@
         .ms-entry-pending{opacity:.7;border-style:dashed}
         .ms-entry-head{display:flex;align-items:center;gap:7px;margin-bottom:5px}
         .ms-avatar{width:22px;height:22px;border-radius:50%;flex-shrink:0;object-fit:cover;background:rgba(255,255,255,.1)}
-        .ms-avatar-anon{display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:rgba(255,255,255,.3);border:1px solid rgba(255,255,255,.1)}
+        .ms-avatar-anon{display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:rgba(255,255,255,.3);border:1px solid rgba(255,255,255,.1);width:22px;height:22px;border-radius:50%}
         .ms-entry-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
         .ms-entry-name{font-weight:600;color:rgba(255,255,255,.82)}
-        .ms-role-chip{font-size:9px;padding:1px 6px;border-radius:8px;text-transform:uppercase;letter-spacing:.04em;font-weight:700}
+        .ms-entry-body{color:rgba(255,255,255,.78);line-height:1.55;white-space:pre-wrap}
+        .ms-entry-actions{display:flex;gap:8px;margin-top:5px;padding-top:4px;border-top:1px solid rgba(255,255,255,.05)}
+        .ms-edit-ta{width:100%;min-height:50px;margin-top:4px}
+        .ms-del-btn{color:rgba(255,100,100,.6)!important}
+        .ms-del-btn:hover{color:rgba(255,100,100,.9)!important}
+        .ms-badges{display:inline-flex;align-items:center;gap:3px}
+        .ms-role-chip{font-size:9px;padding:1px 6px;border-radius:8px;text-transform:uppercase;letter-spacing:.04em;font-weight:700;cursor:default}
         .ms-role-chip-lead_mentor{background:rgba(255,217,61,.15);color:#ffd93d}
         .ms-role-chip-mentor{background:rgba(255,107,107,.15);color:#ff6b6b}
         .ms-role-chip-mentee{background:rgba(107,203,119,.15);color:#6bcb77}
+        .ms-badge-op{font-size:9px;padding:1px 6px;border-radius:8px;text-transform:uppercase;letter-spacing:.04em;font-weight:700;background:rgba(100,160,255,.18);color:#88aaff;cursor:default}
+        .ms-badge-more{display:inline-flex;align-items:center;gap:3px;cursor:pointer}
+        .ms-badge-more-btn{font-size:9px;padding:1px 5px;border-radius:8px;background:rgba(255,255,255,.1);color:rgba(255,255,255,.5)}
+        .ms-badge-more-btn:hover{background:rgba(255,255,255,.18)}
+        .ms-badge-more-list{display:none;gap:3px}
+        .ms-badge-more--open .ms-badge-more-list{display:inline-flex}
+        .ms-badge-more--open .ms-badge-more-btn{display:none}
         .ms-pending-tag{color:#f0a500;font-size:10px}
-        .ms-entry-body{color:rgba(255,255,255,.78);line-height:1.55;white-space:pre-wrap}
         .ms-form{border-top:1px solid rgba(255,255,255,.06);padding-top:7px;margin-top:7px;display:flex;flex-direction:column;gap:5px}
         .ms-textarea{width:100%;min-height:58px;background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.1);border-radius:4px;color:#eee;padding:5px 8px;font-size:12px;resize:vertical;box-sizing:border-box;font-family:inherit}
         .ms-textarea:focus{outline:none;border-color:rgba(255,255,255,.28)}

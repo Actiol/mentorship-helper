@@ -19,21 +19,16 @@ router = APIRouter(prefix="/feedback", tags=["feedback"])
 class FeedbackCreate(BaseModel):
     mentorship_id:  int
     beatmapset_id:  int
-    mentee_osu_id:  int        # whose session to use for visibility tracking
+    mentee_osu_id:  int
     content:        str
-    # Defaults differ by role — the client sends the right value:
-    #   mentor/lead_mentor → after_discussed (hold until reviewed)
-    #   mentee             → immediate (visible right away)
-    # Both roles may change this. Once the map is reviewed the flag is moot.
     visibility:     Visibility = Visibility.after_discussed
-    # Only honoured for mentor / lead_mentor roles
-    is_anonymous:   bool = False
+    is_anonymous:   bool = False   # only honoured for mentor / lead_mentor
 
 
 class FeedbackOut(BaseModel):
     id:              int
     author_osu_id:   int
-    author_username: Optional[str]   # None when anonymous
+    author_username: Optional[str]
     author_role:     UserRole
     content:         str
     visibility:      Visibility
@@ -60,13 +55,8 @@ def _require_member(db: Session, mentorship_id: int, osu_user_id: int) -> Mentor
     return m
 
 
-def _session_is_reviewed(
-    db: Session,
-    beatmapset_id: int,
-    mentorship_id: int,
-    mentee_osu_id: int,
-) -> bool:
-    session = (
+def _session_is_reviewed(db, beatmapset_id, mentorship_id, mentee_osu_id):
+    s = (
         db.query(BeatmapsetSession)
         .filter(
             BeatmapsetSession.beatmapset_id == beatmapset_id,
@@ -75,7 +65,7 @@ def _session_is_reviewed(
         )
         .first()
     )
-    return session.is_discussed if session else False
+    return s.is_discussed if s else False
 
 
 def _to_out(entry: FeedbackEntry, identity: Optional[UserIdentity]) -> FeedbackOut:
@@ -117,13 +107,10 @@ def get_feedback(
     if not discussion:
         return []
 
-    # Reviewed status: prefer session-level, fall back to legacy per-post flag
-    if mentee_osu_id is not None:
-        is_reviewed = _session_is_reviewed(
-            db, discussion.beatmapset_id, mentorship_id, mentee_osu_id
-        )
-    else:
-        is_reviewed = discussion.is_discussed
+    is_reviewed = (
+        _session_is_reviewed(db, discussion.beatmapset_id, mentorship_id, mentee_osu_id)
+        if mentee_osu_id is not None else discussion.is_discussed
+    )
 
     rows = (
         db.query(FeedbackEntry, UserIdentity)
@@ -138,14 +125,11 @@ def get_feedback(
 
     results = []
     for entry, identity in rows:
-        # Mentees see their own entries + any immediate entries.
-        # Once reviewed, everything is visible.
         if member.role == UserRole.mentee and not is_reviewed:
             if (entry.visibility != Visibility.immediate
                     and entry.author_osu_id != current_user.osu_user_id):
                 continue
         results.append(_to_out(entry, identity))
-
     return results
 
 
@@ -158,7 +142,6 @@ def post_feedback(
 ):
     member = _require_member(db, body.mentorship_id, current_user.osu_user_id)
 
-    # Auto-create the BeatmapDiscussion row on first feedback for this post
     discussion = (
         db.query(BeatmapDiscussion)
         .filter(
@@ -176,10 +159,7 @@ def post_feedback(
         db.add(discussion)
         db.flush()
 
-    is_mentor = member.role in (UserRole.mentor, UserRole.lead_mentor)
-
-    # Both roles choose their own visibility.
-    # Only mentors/lead_mentors may post anonymously.
+    is_mentor    = member.role in (UserRole.mentor, UserRole.lead_mentor)
     visibility   = body.visibility
     is_anonymous = body.is_anonymous if is_mentor else False
 
@@ -196,11 +176,7 @@ def post_feedback(
     db.commit()
     db.refresh(entry)
 
-    identity = (
-        db.query(UserIdentity)
-        .filter(UserIdentity.osu_user_id == current_user.osu_user_id)
-        .first()
-    )
+    identity = db.query(UserIdentity).filter(UserIdentity.osu_user_id == current_user.osu_user_id).first()
     return _to_out(entry, identity)
 
 
@@ -213,9 +189,9 @@ def edit_feedback(
 ):
     entry = db.query(FeedbackEntry).filter(FeedbackEntry.id == feedback_id).first()
     if not entry:
-        raise HTTPException(status_code=404, detail="Feedback not found")
+        raise HTTPException(404, "Feedback not found")
     if entry.author_osu_id != current_user.osu_user_id:
-        raise HTTPException(status_code=403, detail="Cannot edit someone else's feedback")
+        raise HTTPException(403, "Cannot edit someone else's feedback")
 
     member    = _require_member(db, entry.mentorship_id, current_user.osu_user_id)
     is_mentor = member.role in (UserRole.mentor, UserRole.lead_mentor)
@@ -223,19 +199,33 @@ def edit_feedback(
     if "content" in body:
         entry.content    = body["content"]
         entry.updated_at = datetime.utcnow()
-    # Both roles can change visibility
     if "visibility" in body:
         entry.visibility = Visibility(body["visibility"])
-    # Only mentors can toggle anonymity
     if "is_anonymous" in body and is_mentor:
         entry.is_anonymous = bool(body["is_anonymous"])
 
     db.commit()
     db.refresh(entry)
-
-    identity = (
-        db.query(UserIdentity)
-        .filter(UserIdentity.osu_user_id == current_user.osu_user_id)
-        .first()
-    )
+    identity = db.query(UserIdentity).filter(UserIdentity.osu_user_id == current_user.osu_user_id).first()
     return _to_out(entry, identity)
+
+
+@router.delete("/{feedback_id}")
+def delete_feedback(
+    feedback_id: int,
+    current_user: CurrentUser = Depends(get_current_user),
+    db:           Session     = Depends(get_db),
+):
+    """
+    Authors can delete their own feedback, including anonymous entries.
+    The server stores author_osu_id regardless of anonymity, so
+    the JWT check is sufficient to authorise the deletion.
+    """
+    entry = db.query(FeedbackEntry).filter(FeedbackEntry.id == feedback_id).first()
+    if not entry:
+        raise HTTPException(404, "Feedback not found")
+    if entry.author_osu_id != current_user.osu_user_id:
+        raise HTTPException(403, "Cannot delete someone else's feedback")
+    db.delete(entry)
+    db.commit()
+    return {"ok": True}
