@@ -23,6 +23,7 @@ class FeedbackCreate(BaseModel):
     content:        str
     visibility:     Visibility = Visibility.after_discussed
     is_anonymous:   bool = False   # only honoured for mentor / lead_mentor
+    is_global:      bool = False   # posted in global mode
 
 
 class FeedbackOut(BaseModel):
@@ -33,7 +34,10 @@ class FeedbackOut(BaseModel):
     content:         str
     visibility:      Visibility
     is_anonymous:    bool
+    is_global:       bool = False
+    edit_count:      int  = 0
     created_at:      datetime
+    updated_at:      Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -80,7 +84,10 @@ def _to_out(entry: FeedbackEntry, identity: Optional[UserIdentity]) -> FeedbackO
         content=entry.content,
         visibility=entry.visibility,
         is_anonymous=entry.is_anonymous,
+        is_global=entry.is_global,
+        edit_count=entry.edit_count or 0,
         created_at=entry.created_at,
+        updated_at=entry.updated_at,
     )
 
 
@@ -96,12 +103,11 @@ def get_feedback(
 ):
     member = _require_member(db, mentorship_id, current_user.osu_user_id)
 
+    # BeatmapDiscussion has ONE row per osu_discussion_id (not per mentorship).
+    # Filter by discussion ID only — mentorship scoping is at the FeedbackEntry level.
     discussion = (
         db.query(BeatmapDiscussion)
-        .filter(
-            BeatmapDiscussion.osu_discussion_id == discussion_id,
-            BeatmapDiscussion.mentorship_id     == mentorship_id,
-        )
+        .filter(BeatmapDiscussion.osu_discussion_id == discussion_id)
         .first()
     )
     if not discussion:
@@ -125,7 +131,8 @@ def get_feedback(
 
     results = []
     for entry, identity in rows:
-        if member.role == UserRole.mentee and not is_reviewed:
+        # Global entries are always visible; otherwise apply mentee visibility rules
+        if not entry.is_global and member.role == UserRole.mentee and not is_reviewed:
             if (entry.visibility != Visibility.immediate
                     and entry.author_osu_id != current_user.osu_user_id):
                 continue
@@ -142,12 +149,11 @@ def post_feedback(
 ):
     member = _require_member(db, body.mentorship_id, current_user.osu_user_id)
 
+    # One BeatmapDiscussion row per osu! discussion ID — NOT per mentorship.
+    # If the row already exists (created by another mentorship), reuse it.
     discussion = (
         db.query(BeatmapDiscussion)
-        .filter(
-            BeatmapDiscussion.osu_discussion_id == discussion_id,
-            BeatmapDiscussion.mentorship_id     == body.mentorship_id,
-        )
+        .filter(BeatmapDiscussion.osu_discussion_id == discussion_id)
         .first()
     )
     if not discussion:
@@ -162,6 +168,9 @@ def post_feedback(
     is_mentor    = member.role in (UserRole.mentor, UserRole.lead_mentor)
     visibility   = body.visibility
     is_anonymous = body.is_anonymous if is_mentor else False
+    # Global posts are always immediate — the review gate doesn't apply
+    if body.is_global:
+        visibility = Visibility.immediate
 
     entry = FeedbackEntry(
         discussion_id=discussion_id,
@@ -171,12 +180,17 @@ def post_feedback(
         content=body.content,
         visibility=visibility,
         is_anonymous=is_anonymous,
+        is_global=body.is_global,
     )
     db.add(entry)
     db.commit()
     db.refresh(entry)
 
-    identity = db.query(UserIdentity).filter(UserIdentity.osu_user_id == current_user.osu_user_id).first()
+    identity = (
+        db.query(UserIdentity)
+        .filter(UserIdentity.osu_user_id == current_user.osu_user_id)
+        .first()
+    )
     return _to_out(entry, identity)
 
 
@@ -189,9 +203,9 @@ def edit_feedback(
 ):
     entry = db.query(FeedbackEntry).filter(FeedbackEntry.id == feedback_id).first()
     if not entry:
-        raise HTTPException(404, "Feedback not found")
+        raise HTTPException(status_code=404, detail="Feedback not found")
     if entry.author_osu_id != current_user.osu_user_id:
-        raise HTTPException(403, "Cannot edit someone else's feedback")
+        raise HTTPException(status_code=403, detail="Cannot edit someone else's feedback")
 
     member    = _require_member(db, entry.mentorship_id, current_user.osu_user_id)
     is_mentor = member.role in (UserRole.mentor, UserRole.lead_mentor)
@@ -199,6 +213,7 @@ def edit_feedback(
     if "content" in body:
         entry.content    = body["content"]
         entry.updated_at = datetime.utcnow()
+        entry.edit_count = (entry.edit_count or 0) + 1
     if "visibility" in body:
         entry.visibility = Visibility(body["visibility"])
     if "is_anonymous" in body and is_mentor:
@@ -206,7 +221,12 @@ def edit_feedback(
 
     db.commit()
     db.refresh(entry)
-    identity = db.query(UserIdentity).filter(UserIdentity.osu_user_id == current_user.osu_user_id).first()
+
+    identity = (
+        db.query(UserIdentity)
+        .filter(UserIdentity.osu_user_id == current_user.osu_user_id)
+        .first()
+    )
     return _to_out(entry, identity)
 
 
@@ -218,14 +238,13 @@ def delete_feedback(
 ):
     """
     Authors can delete their own feedback, including anonymous entries.
-    The server stores author_osu_id regardless of anonymity, so
-    the JWT check is sufficient to authorise the deletion.
+    author_osu_id is stored regardless of anonymity so the JWT check is sufficient.
     """
     entry = db.query(FeedbackEntry).filter(FeedbackEntry.id == feedback_id).first()
     if not entry:
-        raise HTTPException(404, "Feedback not found")
+        raise HTTPException(status_code=404, detail="Feedback not found")
     if entry.author_osu_id != current_user.osu_user_id:
-        raise HTTPException(403, "Cannot delete someone else's feedback")
+        raise HTTPException(status_code=403, detail="Cannot delete someone else's feedback")
     db.delete(entry)
     db.commit()
     return {"ok": True}
