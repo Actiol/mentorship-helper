@@ -3,6 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from shared.database import get_db
 from shared.models import (
@@ -103,8 +104,6 @@ def get_feedback(
 ):
     member = _require_member(db, mentorship_id, current_user.osu_user_id)
 
-    # BeatmapDiscussion has ONE row per osu_discussion_id (not per mentorship).
-    # Filter by discussion ID only — mentorship scoping is at the FeedbackEntry level.
     discussion = (
         db.query(BeatmapDiscussion)
         .filter(BeatmapDiscussion.osu_discussion_id == discussion_id)
@@ -118,12 +117,16 @@ def get_feedback(
         if mentee_osu_id is not None else discussion.is_discussed
     )
 
+    # 2. Update the filter clause here
     rows = (
         db.query(FeedbackEntry, UserIdentity)
         .outerjoin(UserIdentity, UserIdentity.osu_user_id == FeedbackEntry.author_osu_id)
         .filter(
             FeedbackEntry.discussion_id == discussion_id,
-            FeedbackEntry.mentorship_id == mentorship_id,
+            or_(
+                FeedbackEntry.mentorship_id == mentorship_id,
+                FeedbackEntry.is_global == True
+            )
         )
         .order_by(FeedbackEntry.created_at.asc())
         .all()
@@ -138,7 +141,6 @@ def get_feedback(
                 continue
         results.append(_to_out(entry, identity))
     return results
-
 
 @router.post("/{discussion_id}", response_model=FeedbackOut)
 def post_feedback(

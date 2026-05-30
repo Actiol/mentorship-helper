@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         osu! Mentorship Helper
 // @namespace    https://mentorship.actiol.dev
-// @version      2.4.0
+// @version      2.3.0
 // @description  Mentorship feedback panels on osu! beatmap discussions — with offline fallback
 // @author       Actiol
 // @match        https://osu.ppy.sh/*
@@ -58,7 +58,7 @@
     const loadedFeedback = new Map();  // `${mid}-${postId}` → FeedbackOut[]
 
     // ═════════════════════════════════════════════════════════════════════════
-    // DATE HELPERS (Strictly from New Version)
+    // DATE HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
     function parseDate(s) {
@@ -216,9 +216,10 @@
             ? `<select class="ms-select ms-m-pick">${myMentorships.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>`
             : (myMentorships.length === 1 ? `<strong class="ms-m-name">${esc(myMentorships[0].name)}</strong>` : '');
 
+        // Use the exact tooltips from the old version
         const ctrlRow = `
             <div class="ms-top-ctrl-row">
-                <button class="ms-link-btn ms-pos-btn" title="Toggle panel position">📌 Move</button>
+                <button class="ms-link-btn ms-pos-btn" title="Cycle panel position">📌 Move</button>
                 <label class="ms-form-label ms-global-wrap" title="Show feedback panel under every mod post, not just mentee posts. Hides mentorship selector and visibility options.">
                     <input type="checkbox" class="ms-global-chk" ${globalMode?'checked':''}/>
                     Global mode
@@ -249,13 +250,14 @@
             return _insertTop(panel);
         }
 
+        // Use the old version's right-aligned export button container and icon class
         panel.innerHTML = `<div class="ms-card ms-top-card">
             ${offlineBanner}
             <div class="ms-top-row">
                 <span class="ms-section-label">🎓 Mentorship</span>
                 ${msSelector}
                 <div class="ms-top-right">
-                    <button class="ms-icon-btn ms-export-page-btn" title="Export all loaded feedback to .txt">📥 Export</button>
+                    <button class="ms-icon-btn ms-export-page-btn" title="Export (visible!) page feedback to .txt">📥 Export</button>
                 </div>
             </div>
             ${ctrlRow}
@@ -271,7 +273,7 @@
             const body = panel.querySelector('.ms-top-body');
             if (!mid) { body.innerHTML = ''; return; }
             body.innerHTML = _topSkeletonHtml();
-            
+
             const bsid = getBsid();
             const role = myMentorships.find(m => m.id === mid)?.my_role;
 
@@ -393,6 +395,7 @@
         _insertTop(panel);
     }
 
+    // Exact insertion logic strictly pulled from the Old Version
     function _insertTop(panel) {
         const pos = getPanelPos();
         if (pos === '2') {
@@ -400,15 +403,19 @@
             if (ref) { ref.insertAdjacentElement('afterend', panel); return; }
         }
 
+        // --- MODIFIED POSITION 1 ---
+        // Find the element that marks the start of the extra tabs context
         const refTab = document.querySelector('.page-extra-tabs-before');
         if (refTab) {
+            // Injects the panel directly before it, inside the .osu-page block
             refTab.insertAdjacentElement('beforebegin', panel);
             return;
         }
 
+        // Fallbacks if page structure changes or hasn't fully rendered
         const hb = document.querySelector('.beatmap-discussions-header-bottom');
         const ref = hb?.closest('.osu-page');
-        if (ref) { ref.insertAdjacentElement('afterbegin', panel); return; }
+        if (ref) { ref.insertAdjacentElement('afterbegin', panel); return; } // Note: afterbegin matches old ver
         const disc = document.querySelector('.beatmap-discussions');
         if (disc) { disc.insertAdjacentElement('beforebegin', panel); return; }
         document.body.insertBefore(panel, document.body.firstChild);
@@ -425,7 +432,11 @@
             chk.addEventListener('change', () => {
                 globalMode = chk.checked;
                 setSavedGlobal(globalMode);
+
+                // Re-render top panel to show/hide mentorship selector
                 injectTopPanel();
+
+                // Re-scan to add/remove per-post panels
                 document.querySelectorAll(`[${ATTR}]`).forEach(el => {
                     el.querySelectorAll('.ms-panel').forEach(p => p.remove());
                     el.removeAttribute(ATTR);
@@ -478,7 +489,7 @@
             <button class="ms-link-btn ms-sync-btn">Sync</button>
             <button class="ms-link-btn ms-export-btn">Export .txt</button></span>`;
     }
-    
+
     function _refreshPendingBadge() {
         const badge = document.getElementById('ms-pending-badge');
         if (!badge) return;
@@ -489,7 +500,7 @@
             <button class="ms-link-btn ms-export-btn">Export .txt</button>`;
         _bindPending(badge.closest('#ms-top-panel') || document);
     }
-    
+
     function _bindPending(root) {
         root.querySelector('.ms-sync-btn')?.addEventListener('click', syncPending);
         root.querySelector('.ms-export-btn')?.addEventListener('click', () => exportAll(getBsid()));
@@ -763,18 +774,18 @@
 
         header.addEventListener('click', e => {
             if (e.target.closest('.ms-m-pick') || e.target.closest('select')) return;
-            
+
             expanded = !expanded;
             body.style.display = expanded ? 'block' : 'none';
             header.querySelector('.ms-chevron').textContent = expanded ? '▲' : '▼';
             if (expanded) load(getMid());
         });
-        
+
         if (selEl) {
             selEl.addEventListener('click', e => e.stopPropagation());
             selEl.addEventListener('change', () => { loadedMid = null; if (expanded) load(getMid()); });
         }
-        
+
         panel.addEventListener('ms:session', e => { if (expanded && loadedMid) load(loadedMid, true); });
 
         panel.appendChild(header);
@@ -853,7 +864,6 @@
                 metaEl.appendChild(gt);
             }
 
-            // ── TIME FORMATTING FROM NEW VERSION ──────────────────────────────
             const dateObj = parseDate(entry.created_at || entry.createdAt);
             const isoString = dateObj.toISOString();
 
@@ -863,7 +873,6 @@
             dateEl.setAttribute('title', isoString);
             dateEl.textContent = fmtDate(entry.created_at || entry.createdAt);
             metaEl.appendChild(dateEl);
-            // ──────────────────────────────────────────────────────────────────
 
             if (!isReviewed && entry.visibility === 'immediate') {
                 const visEl = document.createElement('span');
@@ -1079,7 +1088,7 @@
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // STYLES (Strictly from Old Version)
+    // STYLES
     // ═════════════════════════════════════════════════════════════════════════
 
     function injectStyles() {
