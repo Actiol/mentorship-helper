@@ -526,109 +526,70 @@
         }
     }
 
-    async function exportAll(bsid, mid) {
-        if (!mid) return alert('No mentorship selected.');
+    function exportAll(bsid) {
+    // 1. Corrected file headers using explicit 'Beatmapset' context
+    const lines = [
+        'osu! Mentorship — Feedback Export',
+        `Beatmapset: https://osu.ppy.sh/beatmapsets/${bsid}/discussion`,
+        `Generated : ${new Date().toLocaleString()}`,
+        '═'.repeat(70),
+    ];
 
-        const btns = document.querySelectorAll('.ms-export-page-btn, .ms-export-btn');
-        btns.forEach(b => { b.disabled = true; b.dataset.origText = b.textContent; b.textContent = 'Exporting…'; });
-
-        let myEntries = [];
-
-        if (apiOnline !== false && getToken()) {
-            try {
-                const r = await safeApi(`/feedback/beatmapset/${bsid}/mine?mentorship_id=${mid}`);
-                if (Array.isArray(r)) myEntries = r;
-            } catch (e) { console.error('Export fetch failed', e); }
-        } else {
-            // Offline fallback: grab from currently expanded panels
-            for (const [key, entries] of loadedFeedback) {
-                const [kMid, postId] = key.split('-');
-                if (parseInt(kMid) === mid) {
-                    const mine = entries.filter(e => e.author_osu_id === myOsuId);
-                    mine.forEach(e => { if (!e.discussion_id) e.discussion_id = parseInt(postId); });
-                    myEntries.push(...mine);
-                }
-            }
-        }
-
-        // Gather unsent (offline) feedback
-        const pending = getPending().filter(e => e.beatmapsetId === bsid && e.mentorshipId === mid);
-
-        btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.origText; });
-
-        if (!myEntries.length && !pending.length) {
-            return alert('No feedback found from you in this beatmapset for the selected mentorship.');
-        }
-
-        // Group everything by post ID for clean formatting
-        const byPost = new Map();
-        
-        myEntries.forEach(e => {
-            if (!byPost.has(e.discussion_id)) byPost.set(e.discussion_id, []);
-            byPost.get(e.discussion_id).push(e);
-        });
-
-        pending.forEach(e => {
-            if (!byPost.has(e.postId)) byPost.set(e.postId, []);
-            byPost.get(e.postId).push({
-                _pending: true,
-                discussion_id: e.postId,
-                author_role: e.authorRole,
-                is_global: e.isGlobal,
-                created_at: e.createdAt,
-                content: e.content,
-                is_anonymous: e.isAnonymous,
-                visibility: e.visibility
-            });
-        });
-
-        const lines = [
-            'osu! Mentorship — My Feedback Export',
-            `Beatmapset: https://osu.ppy.sh/beatmapsets/${bsid}/discussion`,
-            `Mentorship ID: ${mid}`,
-            `Generated : ${new Date().toLocaleString()}`,
-            '═'.repeat(70)
-        ];
-
-        // Sort posts numerically so the text file is organized
-        const sortedPostIds = Array.from(byPost.keys()).sort((a, b) => a - b);
-
-        for (const pid of sortedPostIds) {
+    if (loadedFeedback.size) {
+        lines.push('', '── Stored Feedback ──');
+        for (const [key, entries] of loadedFeedback) {
+            if (!entries.length) continue;
+            const postId = key.split('-')[1];
             lines.push('',
-                `Post #${pid}`,
-                `Permalink: https://osu.ppy.sh/beatmapsets/${bsid}/discussion/-/generalAll#/${pid}`,
+                `Post #${postId}`,
+                // Link refers back to the overarching beatmapset discussion timeline
+                `Permalink: https://osu.ppy.sh/beatmapsets/${bsid}/discussion/-/generalAll#/${postId}`,
                 '─'.repeat(50)
             );
-            
-            const entries = byPost.get(pid).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-            
-            entries.forEach((e) => {
-                const roleStr = roleLabel(e.author_role) || 'Unknown Role';
-                const tagStr = [];
-                
-                if (e.is_global) tagStr.push('global');
-                if (e.is_anonymous) tagStr.push('anon');
-                if (e._pending) tagStr.push(`vis: ${e.visibility === 'immediate' ? 'now' : 'hold'}`);
-                
-                const tags = tagStr.length ? ` [${tagStr.join(', ')}]` : '';
-                const edited = (e.edit_count > 0 && !e._pending) ? ` (edited ${e.edit_count}×)` : '';
-                const state = e._pending ? '[UNSENT] ' : '';
-                
-                lines.push(`  ${state}${roleStr}${tags}${edited}`);
+            entries.forEach(e => {
+                const name = e.is_anonymous
+                    ? `Anonymous ${roleLabel(e.author_role)}`
+                    : (e.author_username || `user#${e.author_osu_id}`);
+                const edited = e.edit_count > 0 ? ` (edited ${e.edit_count}×)` : '';
+                lines.push(`  [${roleLabel(e.author_role)}${e.is_global ? ', global' : ''}] ${name}${edited}`);
                 lines.push(`  ${fmtDate(e.created_at)}`);
                 lines.push(`  ${e.content}`, '');
             });
         }
-
-        const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
-
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `my-feedback-${bsid}-${Date.now()}.txt`;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
+
+    const pending = getPending();
+    if (pending.length) {
+        lines.push('', '── Unsent (offline) Feedback ──');
+        pending.forEach((e, i) => {
+            lines.push('',
+                `[UNSENT ${i+1}] Post #${e.postId}`,
+                `Permalink: https://osu.ppy.sh/beatmapsets/${e.beatmapsetId}/discussion/-/generalAll#/${e.postId}`,
+                `Role      : ${e.authorRole || '?'}`,
+                `Visibility: ${e.visibility === 'immediate' ? 'Visible now' : 'Hold until reviewed'}`,
+                `Anonymous : ${e.isAnonymous ? 'Yes' : 'No'}`,
+                `Global    : ${e.isGlobal ? 'Yes' : 'No'}`,
+                `Date      : ${fmtDate(e.createdAt)}`,
+                '─'.repeat(50),
+                `  ${e.content}`, ''
+            );
+        });
+    }
+
+    if (lines.length <= 4) { 
+        alert('No feedback to export yet — open some mod posts first.'); 
+        return; 
+    }
+
+    // 2. Fixed line endings: Join using actual '\n' inside a real array
+    // 3. Normalized file name syntax to use 'beatmapset'
+    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' }));
+    Object.assign(document.createElement('a'), { 
+        href: url, 
+        download: `beatmapset-${bsid}-feedback-${Date.now()}.txt` 
+    }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
     // ═════════════════════════════════════════════════════════════════════════
     // BADGE SYSTEM
