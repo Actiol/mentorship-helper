@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         osu! Mentorship Helper
 // @namespace    https://mentorship.actiol.dev
-// @version      2.4.0
+// @version      2.5.1
 // @description  Mentorship feedback panels on osu! beatmap discussions — with offline fallback
 // @author       Actiol
 // @match        https://osu.ppy.sh/*
@@ -144,7 +144,7 @@
         if (!authorId || isNaN(authorId)) return null;
         return { postId, authorId, inner };
     }
-	
+
 	// ═════════════════════════════════════════════════════════════════════════
     // INIT
     // ═════════════════════════════════════════════════════════════════════════
@@ -719,9 +719,34 @@
             el.setAttribute(ATTR, '1');
             const isGlobal = !isMenteePost || globalMode;
             const panel = buildPanel(postId, bsid, authorId, relevant, isGlobal);
-            const line  = inner.querySelector('.beatmap-discussion__line');
-            if (line) inner.insertBefore(panel, line);
-            else inner.appendChild(panel);
+
+            // 1. Force the row to allow wrapping (using !important just in case osu! overrides it)
+            el.style.setProperty('flex-wrap', 'wrap', 'important');
+
+            // 2. The Flex Break: A 100% width invisible div that forces a new row
+            const flexBreak = document.createElement('div');
+            flexBreak.style.flexBasis = '100%';
+            flexBreak.style.height = '0';
+            flexBreak.style.margin = '0';
+            flexBreak.style.padding = '0';
+
+            // 3. The Ghost Spacer: Mimics the left timestamp column
+            const leftSpacer = document.createElement('div');
+            leftSpacer.className = 'beatmap-discussion__timestamp hidden-xs';
+            leftSpacer.style.visibility = 'hidden';
+            leftSpacer.style.height = '0';
+            leftSpacer.style.margin = '0';
+            leftSpacer.style.padding = '0';
+
+            // 4. Panel setup: Take up the remaining space on the new row
+            panel.style.flex = '1 1 0%';
+            panel.style.minWidth = '0';
+            panel.style.marginTop = '0';
+
+            // Append them in order: Break the line -> Add left indent -> Add panel
+            el.appendChild(flexBreak);
+            el.appendChild(leftSpacer);
+            el.appendChild(panel);
         });
     }
 
@@ -736,8 +761,9 @@
 
         const header = document.createElement('div');
         header.className = 'ms-panel-header';
-        // Count badge (non-global only) is populated by the background fetch below
-        header.innerHTML = `<span class="ms-chevron">▼</span><span class="ms-panel-label">🎓 Feedback${isGlobal ? ' <span class="ms-global-tag">global</span>' : ''}</span>${!isGlobal ? '<span class="ms-count-badge"></span>' : ''}`;
+
+        // Ensure the count badge always exists in the DOM, regardless of mode
+        header.innerHTML = `<span class="ms-chevron">▼</span><span class="ms-panel-label">🎓 Feedback${isGlobal ? ' <span class="ms-global-tag">global</span>' : ''}</span><span class="ms-count-badge"></span>`;
 
         let selEl = null;
         if (!isGlobal && mentorships.length > 1) {
@@ -753,16 +779,14 @@
         body.className = 'ms-panel-body';
         body.style.display = 'none';
 
-        // knownCount is populated by the background count fetch and used to size
-        // the skeleton loader so the panel doesn't jump when entries load.
         let expanded = false, loadedMid = null, knownCount = null;
         const getMid = () => selEl ? parseInt(selEl.value) : mentorships[0].id;
 
-        // Background fetch: resolve entry count → update header badge + skeleton size.
-        // Skipped in global mode (count would include non-global entries, misleading).
-        if (!isGlobal && apiOnline !== false && getToken()) {
+        // Background fetch: resolve entry count for both modes
+        if (apiOnline !== false && getToken()) {
             const _cUrl = `/feedback/${postId}/count?mentorship_id=${mentorships[0].id}` +
-                          (menteeOsuId ? `&mentee_osu_id=${menteeOsuId}` : '');
+                            (menteeOsuId ? `&mentee_osu_id=${menteeOsuId}` : '') +
+                            (isGlobal ? `&is_global=true` : '');
             safeApi(_cUrl).then(r => {
                 if (r && typeof r.count === 'number' && r.count > 0) {
                     knownCount = r.count;
@@ -1139,12 +1163,28 @@
         .ms-badge-reviewed{display:inline-flex;align-items:center;padding:2px 10px;background:rgba(75,210,143,.15);color:#4bd28f;border-radius:10px;font-size:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
         .ms-offline-banner{padding:7px 10px;background:rgba(240,100,60,.1);border:1px solid rgba(240,100,60,.3);border-radius:5px;color:rgba(255,140,100,.9);font-size:11px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
         .ms-offline-notice{padding:4px 8px;background:rgba(240,100,60,.08);border-left:3px solid rgba(240,100,60,.4);color:rgba(255,140,100,.8);font-size:11px;margin-bottom:6px;border-radius:2px}
+
+        /* --- FEEDBACK PANEL - EXTENSION STYLES --- */
         .ms-panel {
-            margin-top: 6px;
-            border-top: 1px solid rgba(255,255,255,.06);
-            padding: 6px 10px 5px;
-            font-size: 12px;
+            margin-bottom: 6px;
+            border-top: 1px solid hsl(var(--hsl-b5));
+            padding: 2px;
+            background: hsl(var(--hsl-b4));
+            border-radius: 0 0 8px 8px;
+            overflow: hidden;
+            box-shadow: 0 10px 20px rgba(0,0,0,.25);
         }
+        .beatmap-discussion[data-ms-injected] .beatmap-discussion__discussion {
+            border-bottom-left-radius: 0 !important;
+            border-bottom-right-radius: 0 !important;
+            margin-bottom: 0 !important;
+            padding-bottom: 0 !important;
+            box-shadow: None !important;
+        }
+        .beatmap-discussion[data-ms-injected] .beatmap-discussion__line {
+            border-bottom-left-radius: 0 !important;
+        }
+
         .ms-panel-header {
             display: flex;
             align-items: center;
@@ -1152,8 +1192,9 @@
             cursor: pointer;
             color: rgba(255,255,255,.38);
             user-select: none;
-            width: 100%;
-            padding: 4px 0;
+            padding: 8px 12px 8px;
+            background: transparent;
+            margin: 0 auto;
         }
         .ms-panel-header:hover {
             color: rgba(255,255,255,.75);
@@ -1186,8 +1227,16 @@
             width: 10px;
             text-align: center;
         }
-        .ms-panel-body{margin-top:8px}
-        .ms-entry{padding:7px 9px;margin-bottom:5px;background:rgba(255,255,255,.04);border-radius:4px;border-left:3px solid rgba(255,255,255,.1)}
+
+        /* Main feedback body — now background is on parent, so body is just content */
+        .ms-panel-body {
+            background: transparent;
+            border-radius: 0;
+            padding: 0 10px 10px;
+            margin-top: 0;
+        }
+
+        .ms-entry{padding:7px 9px;margin-bottom:5px;background:rgba(255,255,255,.04);border-radius:4px;border-left:3px solid rgba(255,255,255,.1);font-size:12px}
         .ms-entry-pending{opacity:.7;border-style:dashed}
         .ms-entry-head{display:flex;align-items:center;gap:7px;margin-bottom:5px}
         .ms-avatar{width:22px;height:22px;border-radius:50%;flex-shrink:0;object-fit:cover;background:rgba(255,255,255,.1)}
@@ -1214,13 +1263,15 @@
         .ms-badge-more--open .ms-badge-more-list{display:inline-flex}
         .ms-badge-more--open .ms-badge-more-btn{display:none}
         .ms-pending-tag{color:#f0a500;font-size:10px}
+
+        /* Form inside the integrated body */
         .ms-form {
-            border-top: 1px solid rgba(255,255,255,.06);
-            padding-top: 12px;
-            margin-top: 12px;
+            border-top: none;
+            padding-top: 8px;
+            margin-top: 8px;
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 8px;
         }
         .ms-textarea {
             width: 100%;
@@ -1256,7 +1307,7 @@
         .ms-btn-primary{background:hsl(var(--hsl-h2));color:hsl(var(--hsl-c1));transition:background-color 120ms}
         .ms-btn-primary:hover{background:hsl(var(--hsl-h1));color:hsl(var(--hsl-c1))}
         .ms-btn-primary:disabled{opacity:.4;cursor:not-allowed}
-        .ms-btn-submit{padding:5px 18px;border-radius:10000px;font-size:12px}
+        .ms-btn-submit{padding:5px 18px;border-radius:4px;font-size:12px;margin-left:auto}
         .ms-btn-ghost{background:transparent;color:rgba(255,255,255,.4);border-color:rgba(255,255,255,.15)}
         .ms-btn-ghost:hover{color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.35)}
 

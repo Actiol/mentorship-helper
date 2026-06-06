@@ -99,6 +99,7 @@ def get_feedback_count(
     discussion_id: int,
     mentorship_id: int,
     mentee_osu_id: Optional[int] = None,
+    is_global:     bool = False, # Added parameter
     current_user:  CurrentUser   = Depends(get_current_user),
     db:            Session       = Depends(get_db),
 ):
@@ -119,6 +120,19 @@ def get_feedback_count(
         else discussion.is_discussed
     )
 
+    # 1. Global mode: strictly count global entries
+    if is_global:
+        rows = (
+            db.query(FeedbackEntry)
+            .filter(
+                FeedbackEntry.discussion_id == discussion_id,
+                FeedbackEntry.is_global == True
+            )
+            .all()
+        )
+        return {"count": len(rows)}
+
+    # 2. Standard mode: count scoped entries (and visible global entries)
     rows = (
         db.query(FeedbackEntry)
         .filter(
@@ -142,7 +156,6 @@ def get_feedback_count(
         count += 1
 
     return {"count": count}
-
 
 @router.get("/{discussion_id}", response_model=List[FeedbackOut])
 def get_feedback(
