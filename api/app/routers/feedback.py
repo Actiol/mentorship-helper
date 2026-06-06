@@ -29,6 +29,7 @@ class FeedbackCreate(BaseModel):
 
 class FeedbackOut(BaseModel):
     id:              int
+    discussion_id:   int
     author_osu_id:   int
     author_username: Optional[str]
     author_role:     UserRole
@@ -79,6 +80,7 @@ def _to_out(entry: FeedbackEntry, identity: Optional[UserIdentity]) -> FeedbackO
     )
     return FeedbackOut(
         id=entry.id,
+        discussion_id=entry.discussion_id, # <--- ADD THIS
         author_osu_id=entry.author_osu_id,
         author_username=username,
         author_role=entry.author_role,
@@ -90,7 +92,6 @@ def _to_out(entry: FeedbackEntry, identity: Optional[UserIdentity]) -> FeedbackO
         created_at=entry.created_at,
         updated_at=entry.updated_at,
     )
-
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
@@ -315,3 +316,25 @@ def delete_feedback(
     db.delete(entry)
     db.commit()
     return {"ok": True}
+
+@router.get("/beatmapset/{beatmapset_id}/mine", response_model=List[FeedbackOut])
+def get_my_beatmapset_feedback(
+    beatmapset_id: int,
+    mentorship_id: int,
+    current_user:  CurrentUser = Depends(get_current_user),
+    db:            Session     = Depends(get_db),
+):
+    """Fetch all feedback by the current user for a specific beatmapset & mentorship."""
+    rows = (
+        db.query(FeedbackEntry, UserIdentity)
+        .join(BeatmapDiscussion, BeatmapDiscussion.osu_discussion_id == FeedbackEntry.discussion_id)
+        .outerjoin(UserIdentity, UserIdentity.osu_user_id == FeedbackEntry.author_osu_id)
+        .filter(
+            BeatmapDiscussion.beatmapset_id == beatmapset_id,
+            FeedbackEntry.author_osu_id == current_user.osu_user_id,
+            FeedbackEntry.mentorship_id == mentorship_id
+        )
+        .order_by(FeedbackEntry.created_at.asc())
+        .all()
+    )
+    return [_to_out(entry, identity) for entry, identity in rows]

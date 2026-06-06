@@ -262,7 +262,7 @@
             <div class="ms-top-body"></div>
         </div>`;
 
-        panel.querySelector('.ms-export-page-btn').addEventListener('click', () => exportAll(getBsid()));
+        panel.querySelector('.ms-export-page-btn').addEventListener('click', () => exportAll(getBsid(), getMid()));
 
         const sel    = panel.querySelector('.ms-m-pick');
         const getMid = () => sel ? parseInt(sel.value) : myMentorships[0]?.id;
@@ -493,7 +493,12 @@
 
     function _bindPending(root) {
         root.querySelector('.ms-sync-btn')?.addEventListener('click', syncPending);
-        root.querySelector('.ms-export-btn')?.addEventListener('click', () => exportAll(getBsid()));
+        root.querySelector('.ms-export-btn')?.addEventListener('click', () => {
+    const topPanel = document.getElementById('ms-top-panel');
+    const sel = topPanel?.querySelector('.ms-m-pick');
+    const mid = sel ? parseInt(sel.value) : (myMentorships[0]?.id || null);
+    exportAll(getBsid(), mid);
+});
     }
 
     async function syncPending() {
@@ -521,57 +526,107 @@
         }
     }
 
-    function exportAll(bsid) {
-        const lines = [
-            'osu! Mentorship — Feedback Export',
-            `Beatmapset: https://osu.ppy.sh/beatmapsets/${bsid}/discussion`,
-            `Generated : ${new Date().toLocaleString()}`,
-            '═'.repeat(70),
-        ];
+    async function exportAll(bsid, mid) {
+        if (!mid) return alert('No mentorship selected.');
 
-        if (loadedFeedback.size) {
-            lines.push('', '── Stored Feedback ──');
+        const btns = document.querySelectorAll('.ms-export-page-btn, .ms-export-btn');
+        btns.forEach(b => { b.disabled = true; b.dataset.origText = b.textContent; b.textContent = 'Exporting…'; });
+
+        let myEntries = [];
+
+        if (apiOnline !== false && getToken()) {
+            try {
+                const r = await safeApi(`/feedback/beatmapset/${bsid}/mine?mentorship_id=${mid}`);
+                if (Array.isArray(r)) myEntries = r;
+            } catch (e) { console.error('Export fetch failed', e); }
+        } else {
+            // Offline fallback: grab from currently expanded panels
             for (const [key, entries] of loadedFeedback) {
-                if (!entries.length) continue;
-                const postId = key.split('-')[1];
-                lines.push('',
-                    `Post #${postId}`,
-                    `Permalink: https://osu.ppy.sh/beatmapsets/${bsid}/discussion/-/generalAll#/${postId}`,
-                    '─'.repeat(50)
-                );
-                entries.forEach(e => {
-                    const name = e.is_anonymous
-                        ? `Anonymous ${roleLabel(e.author_role)}`
-                        : (e.author_username || `user#${e.author_osu_id}`);
-                    const edited = e.edit_count > 0 ? ` (edited ${e.edit_count}×)` : '';
-                    lines.push(`  [${roleLabel(e.author_role)}${e.is_global ? ', global' : ''}] ${name}${edited}`);
-                    lines.push(`  ${fmtDate(e.created_at)}`);
-                    lines.push(`  ${e.content}`, '');
-                });
+                const [kMid, postId] = key.split('-');
+                if (parseInt(kMid) === mid) {
+                    const mine = entries.filter(e => e.author_osu_id === myOsuId);
+                    mine.forEach(e => { if (!e.discussion_id) e.discussion_id = parseInt(postId); });
+                    myEntries.push(...mine);
+                }
             }
         }
 
-        const pending = getPending();
-        if (pending.length) {
-            lines.push('', '── Unsent (offline) Feedback ──');
-            pending.forEach((e, i) => {
-                lines.push('',
-                    `[UNSENT ${i+1}] Post #${e.postId}`,
-                    `Permalink: https://osu.ppy.sh/beatmapsets/${e.beatmapsetId}/discussion/-/generalAll#/${e.postId}`,
-                    `Role      : ${e.authorRole || '?'}`,
-                    `Visibility: ${e.visibility === 'immediate' ? 'Visible now' : 'Hold until reviewed'}`,
-                    `Anonymous : ${e.isAnonymous ? 'Yes' : 'No'}`,
-                    `Global    : ${e.isGlobal ? 'Yes' : 'No'}`,
-                    `Date      : ${fmtDate(e.createdAt)}`,
-                    '─'.repeat(50),
-                    `  ${e.content}`, ''
-                );
+        // Gather unsent (offline) feedback
+        const pending = getPending().filter(e => e.beatmapsetId === bsid && e.mentorshipId === mid);
+
+        btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.origText; });
+
+        if (!myEntries.length && !pending.length) {
+            return alert('No feedback found from you in this beatmapset for the selected mentorship.');
+        }
+
+        // Group everything by post ID for clean formatting
+        const byPost = new Map();
+        
+        myEntries.forEach(e => {
+            if (!byPost.has(e.discussion_id)) byPost.set(e.discussion_id, []);
+            byPost.get(e.discussion_id).push(e);
+        });
+
+        pending.forEach(e => {
+            if (!byPost.has(e.postId)) byPost.set(e.postId, []);
+            byPost.get(e.postId).push({
+                _pending: true,
+                discussion_id: e.postId,
+                author_role: e.authorRole,
+                is_global: e.isGlobal,
+                created_at: e.createdAt,
+                content: e.content,
+                is_anonymous: e.isAnonymous,
+                visibility: e.visibility
+            });
+        });
+
+        const lines = [
+            'osu! Mentorship — My Feedback Export',
+            `Beatmapset: https://osu.ppy.sh/beatmapsets/${bsid}/discussion`,
+            `Mentorship ID: ${mid}`,
+            `Generated : ${new Date().toLocaleString()}`,
+            '═'.repeat(70)
+        ];
+
+        // Sort posts numerically so the text file is organized
+        const sortedPostIds = Array.from(byPost.keys()).sort((a, b) => a - b);
+
+        for (const pid of sortedPostIds) {
+            lines.push('',
+                `Post #${pid}`,
+                `Permalink: https://osu.ppy.sh/beatmapsets/${bsid}/discussion/-/generalAll#/${pid}`,
+                '─'.repeat(50)
+            );
+            
+            const entries = byPost.get(pid).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            
+            entries.forEach((e) => {
+                const roleStr = roleLabel(e.author_role) || 'Unknown Role';
+                const tagStr = [];
+                
+                if (e.is_global) tagStr.push('global');
+                if (e.is_anonymous) tagStr.push('anon');
+                if (e._pending) tagStr.push(`vis: ${e.visibility === 'immediate' ? 'now' : 'hold'}`);
+                
+                const tags = tagStr.length ? ` [${tagStr.join(', ')}]` : '';
+                const edited = (e.edit_count > 0 && !e._pending) ? ` (edited ${e.edit_count}×)` : '';
+                const state = e._pending ? '[UNSENT] ' : '';
+                
+                lines.push(`  ${state}${roleStr}${tags}${edited}`);
+                lines.push(`  ${fmtDate(e.created_at)}`);
+                lines.push(`  ${e.content}`, '');
             });
         }
 
-        if (lines.length <= 4) { alert('No feedback to export yet — open some mod posts first.'); return; }
-        const url = URL.createObjectURL(new Blob([lines.join('\\n')], { type: 'text/plain;charset=utf-8' }));
-        Object.assign(document.createElement('a'), { href: url, download: `mentorship-${bsid}-${Date.now()}.txt` }).click();
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `my-feedback-${bsid}-${Date.now()}.txt`;
+        a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
