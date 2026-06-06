@@ -29,7 +29,7 @@ class FeedbackCreate(BaseModel):
 
 class FeedbackOut(BaseModel):
     id:              int
-    discussion_id:   int
+    discussion_id:   int   
     author_osu_id:   int
     author_username: Optional[str]
     author_role:     UserRole
@@ -80,7 +80,7 @@ def _to_out(entry: FeedbackEntry, identity: Optional[UserIdentity]) -> FeedbackO
     )
     return FeedbackOut(
         id=entry.id,
-        discussion_id=entry.discussion_id, # <--- ADD THIS
+        discussion_id=entry.discussion_id, 
         author_osu_id=entry.author_osu_id,
         author_username=username,
         author_role=entry.author_role,
