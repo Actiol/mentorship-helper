@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         osu! Mentorship Helper
 // @namespace    https://mentorship.actiol.dev
-// @version      2.3.0
+// @version      2.4.0
 // @description  Mentorship feedback panels on osu! beatmap discussions — with offline fallback
 // @author       Actiol
 // @match        https://osu.ppy.sh/*
@@ -65,7 +65,7 @@
         if (!s) return new Date();
         if (typeof s === 'string'
                 && !s.endsWith('Z')
-                && !/[+\-]\d{2}:?\d{2}$/.test(s)) {
+                && !/[+\\-]\\d{2}:?\\d{2}$/.test(s)) {
             s = s + 'Z';
         }
         return new Date(s);
@@ -144,8 +144,8 @@
         if (!authorId || isNaN(authorId)) return null;
         return { postId, authorId, inner };
     }
-
-    // ═════════════════════════════════════════════════════════════════════════
+	
+	// ═════════════════════════════════════════════════════════════════════════
     // INIT
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -216,7 +216,6 @@
             ? `<select class="ms-select ms-m-pick">${myMentorships.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>`
             : (myMentorships.length === 1 ? `<strong class="ms-m-name">${esc(myMentorships[0].name)}</strong>` : '');
 
-        // Use the exact tooltips from the old version
         const ctrlRow = `
             <div class="ms-top-ctrl-row">
                 <button class="ms-link-btn ms-pos-btn" title="Cycle panel position">📌 Move</button>
@@ -250,7 +249,6 @@
             return _insertTop(panel);
         }
 
-        // Use the old version's right-aligned export button container and icon class
         panel.innerHTML = `<div class="ms-card ms-top-card">
             ${offlineBanner}
             <div class="ms-top-row">
@@ -395,27 +393,20 @@
         _insertTop(panel);
     }
 
-    // Exact insertion logic strictly pulled from the Old Version
     function _insertTop(panel) {
         const pos = getPanelPos();
         if (pos === '2') {
             const ref = document.querySelector('.beatmap-discussion-new-float');
             if (ref) { ref.insertAdjacentElement('afterend', panel); return; }
         }
-
-        // --- MODIFIED POSITION 1 ---
-        // Find the element that marks the start of the extra tabs context
         const refTab = document.querySelector('.page-extra-tabs-before');
         if (refTab) {
-            // Injects the panel directly before it, inside the .osu-page block
             refTab.insertAdjacentElement('beforebegin', panel);
             return;
         }
-
-        // Fallbacks if page structure changes or hasn't fully rendered
         const hb = document.querySelector('.beatmap-discussions-header-bottom');
         const ref = hb?.closest('.osu-page');
-        if (ref) { ref.insertAdjacentElement('afterbegin', panel); return; } // Note: afterbegin matches old ver
+        if (ref) { ref.insertAdjacentElement('afterbegin', panel); return; }
         const disc = document.querySelector('.beatmap-discussions');
         if (disc) { disc.insertAdjacentElement('beforebegin', panel); return; }
         document.body.insertBefore(panel, document.body.firstChild);
@@ -432,11 +423,7 @@
             chk.addEventListener('change', () => {
                 globalMode = chk.checked;
                 setSavedGlobal(globalMode);
-
-                // Re-render top panel to show/hide mentorship selector
                 injectTopPanel();
-
-                // Re-scan to add/remove per-post panels
                 document.querySelectorAll(`[${ATTR}]`).forEach(el => {
                     el.querySelectorAll('.ms-panel').forEach(p => p.remove());
                     el.removeAttribute(ATTR);
@@ -465,9 +452,12 @@
             </div>`;
     }
 
-    function _skeletonHtml() {
+    // count: number of expected entries — skeleton cards match so the layout
+    // doesn't jump when real content loads. Clamped to 1–8.
+    function _skeletonHtml(count) {
+        const n = Math.max(1, Math.min(count || 2, 8));
         let html = '<div class="ms-skeleton-container" style="margin-top: 12px;">';
-        for (let i = 0; i < 2; i++) {
+        for (let i = 0; i < n; i++) {
             html += `
                 <div class="ms-skeleton-card">
                     <div class="ms-skeleton-header">
@@ -580,7 +570,7 @@
         }
 
         if (lines.length <= 4) { alert('No feedback to export yet — open some mod posts first.'); return; }
-        const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' }));
+        const url = URL.createObjectURL(new Blob([lines.join('\\n')], { type: 'text/plain;charset=utf-8' }));
         Object.assign(document.createElement('a'), { href: url, download: `mentorship-${bsid}-${Date.now()}.txt` }).click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
@@ -685,6 +675,20 @@
         return el;
     }
 
+    // Maps the primary badge class to a left-border colour so the entry accent
+    // always reflects the most meaningful role (OP beats role, current-mentorship
+    // role beats others).
+    function _badgeBorderColor(badge) {
+        if (!badge) return 'rgba(255,255,255,.1)';
+        const map = {
+            'ms-badge-op':              '#88aaff',
+            'ms-role-chip-lead_mentor': '#ffd93d',
+            'ms-role-chip-mentor':      '#ff6b6b',
+            'ms-role-chip-mentee':      '#6bcb77',
+        };
+        return map[badge.cls] || 'rgba(255,255,255,.1)';
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     // SCAN
     // ═════════════════════════════════════════════════════════════════════════
@@ -732,7 +736,8 @@
 
         const header = document.createElement('div');
         header.className = 'ms-panel-header';
-        header.innerHTML = `<span class="ms-chevron">▼</span><span class="ms-panel-label">🎓 Feedback${isGlobal ? ' <span class="ms-global-tag">global</span>' : ''}</span>`;
+        // Count badge (non-global only) is populated by the background fetch below
+        header.innerHTML = `<span class="ms-chevron">▼</span><span class="ms-panel-label">🎓 Feedback${isGlobal ? ' <span class="ms-global-tag">global</span>' : ''}</span>${!isGlobal ? '<span class="ms-count-badge"></span>' : ''}`;
 
         let selEl = null;
         if (!isGlobal && mentorships.length > 1) {
@@ -748,13 +753,29 @@
         body.className = 'ms-panel-body';
         body.style.display = 'none';
 
-        let expanded = false, loadedMid = null;
+        // knownCount is populated by the background count fetch and used to size
+        // the skeleton loader so the panel doesn't jump when entries load.
+        let expanded = false, loadedMid = null, knownCount = null;
         const getMid = () => selEl ? parseInt(selEl.value) : mentorships[0].id;
+
+        // Background fetch: resolve entry count → update header badge + skeleton size.
+        // Skipped in global mode (count would include non-global entries, misleading).
+        if (!isGlobal && apiOnline !== false && getToken()) {
+            const _cUrl = `/feedback/${postId}/count?mentorship_id=${mentorships[0].id}` +
+                          (menteeOsuId ? `&mentee_osu_id=${menteeOsuId}` : '');
+            safeApi(_cUrl).then(r => {
+                if (r && typeof r.count === 'number' && r.count > 0) {
+                    knownCount = r.count;
+                    const cs = panel.querySelector('.ms-count-badge');
+                    if (cs) cs.textContent = `(${r.count})`;
+                }
+            });
+        }
 
         async function load(mid, force = false) {
             if (loadedMid === mid && !force) return;
             loadedMid = mid;
-            body.innerHTML = _skeletonHtml();
+            body.innerHTML = _skeletonHtml(knownCount);
 
             if (apiOnline === false) {
                 body.dataset.loaded = '1';
@@ -811,11 +832,15 @@
             container.appendChild(n);
         }
 
-        const pending = getPending().filter(e => e.postId === postId && e.mentorshipId === mid);
+        // In global mode only show entries explicitly posted as global;
+        // mentorship-scoped entries belong to the private mentee review context.
+        const visibleEntries = isGlobal ? entries.filter(e => e.is_global) : entries;
+        const rawPending = getPending().filter(e => e.postId === postId && e.mentorshipId === mid);
+        const visiblePending = isGlobal ? rawPending.filter(e => e.isGlobal) : rawPending;
 
         const all = [
-            ...entries,
-            ...pending.map(e => ({
+            ...visibleEntries,
+            ...visiblePending.map(e => ({
                 _pending:       true,
                 localId:        e.localId,
                 author_osu_id:  myOsuId,
@@ -837,8 +862,11 @@
         }
 
         all.forEach(entry => {
+            // Compute badges first so the primary badge drives the left-border colour
+            const badges = getBadges(entry, menteeOsuId, mid, isGlobal);
             const item = document.createElement('div');
-            item.className = `ms-entry ms-role-${entry.author_role}${entry._pending ? ' ms-entry-pending' : ''}`;
+            item.className = `ms-entry${entry._pending ? ' ms-entry-pending' : ''}`;
+            item.style.borderLeftColor = _badgeBorderColor(badges[0]);
 
             const name = entry.is_anonymous
                 ? `Anonymous ${roleLabel(entry.author_role)}`
@@ -854,7 +882,7 @@
             const metaEl = document.createElement('div');
             metaEl.className = 'ms-entry-meta';
             metaEl.appendChild(nameEl);
-            metaEl.appendChild(renderBadges(getBadges(entry, menteeOsuId, mid, isGlobal)));
+            metaEl.appendChild(renderBadges(badges));
 
             if (entry.is_global) {
                 const gt = document.createElement('span');
@@ -1114,7 +1142,7 @@
         .ms-panel {
             margin-top: 6px;
             border-top: 1px solid rgba(255,255,255,.06);
-            padding: 6px 10px 5px; /* Added matching horizontal padding to fix edge jam */
+            padding: 6px 10px 5px;
             font-size: 12px;
         }
         .ms-panel-header {
@@ -1125,7 +1153,6 @@
             color: rgba(255,255,255,.38);
             user-select: none;
             width: 100%;
-            /* Keeps full width hitbox */
             padding: 4px 0;
         }
         .ms-panel-header:hover {
@@ -1142,7 +1169,7 @@
         .ms-select-sm {
             font-size: 11px;
             padding: 4px 26px 4px 10px;
-            height: 26px; /* Uniform height bounding box */
+            height: 26px;
             box-sizing: border-box;
         }
         .ms-panel-label {
@@ -1151,6 +1178,7 @@
             letter-spacing: .08em;
             font-weight: 700;
         }
+        .ms-count-badge{font-size:10px;color:rgba(255,255,255,.38);margin-left:2px;font-weight:400;letter-spacing:.02em}
         .ms-global-tag{font-size:9px;background:rgba(255,200,0,.2);color:#f0c040;padding:1px 5px;border-radius:4px;vertical-align:middle;margin-left:3px}
         .ms-chevron {
             font-size: 9px;
@@ -1160,7 +1188,6 @@
         }
         .ms-panel-body{margin-top:8px}
         .ms-entry{padding:7px 9px;margin-bottom:5px;background:rgba(255,255,255,.04);border-radius:4px;border-left:3px solid rgba(255,255,255,.1)}
-        .ms-role-lead_mentor{border-color:#ffd93d}.ms-role-mentor{border-color:#ff6b6b}.ms-role-mentee{border-color:#6bcb77}
         .ms-entry-pending{opacity:.7;border-style:dashed}
         .ms-entry-head{display:flex;align-items:center;gap:7px;margin-bottom:5px}
         .ms-avatar{width:22px;height:22px;border-radius:50%;flex-shrink:0;object-fit:cover;background:rgba(255,255,255,.1)}
@@ -1198,11 +1225,11 @@
         .ms-textarea {
             width: 100%;
             min-height: 70px;
-            background: rgba(0,0,0,.20); /* Sleek background matches native osu comments */
+            background: rgba(0,0,0,.20);
             border: 1px solid rgba(255,255,255,.05);
             border-radius: 6px;
             color: #eee;
-            padding: 12px 16px; /* Inner spacing alignment */
+            padding: 12px 16px;
             font-size: 13px;
             resize: vertical;
             box-sizing: border-box;
@@ -1217,24 +1244,19 @@
         .ms-form-row {
             display: flex;
             align-items: center;
-            justify-content: space-between; /* Positions the drop-down selector left and Post button right */
+            justify-content: space-between;
             gap: 8px;
             flex-wrap: wrap;
             margin-top: 2px;
         }
         .ms-form-label{display:flex;align-items:center;gap:4px;color:rgba(255,255,255,.45);font-size:11px;cursor:pointer;user-select:none}
         .ms-global-wrap{color:rgba(255,255,255,.5)}
-        .ms-btn-submit {
-            padding: 6px 20px;
-            /* Chunkier padding matches native brown 'Respond' layout */
-            border-radius: 4px;
-            font-size: 12px;
-        }
         .ms-btn{padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;border:1px solid transparent}
         .ms-btn-sm{padding:2px 9px;font-size:10px}
-        .ms-btn-primary{background:#e8496a;color:#fff}
-        .ms-btn-primary:hover{background:#cf3f5e}
+        .ms-btn-primary{background:hsl(var(--hsl-h2));color:hsl(var(--hsl-c1));transition:background-color 120ms}
+        .ms-btn-primary:hover{background:hsl(var(--hsl-h1));color:hsl(var(--hsl-c1))}
         .ms-btn-primary:disabled{opacity:.4;cursor:not-allowed}
+        .ms-btn-submit{padding:5px 18px;border-radius:10000px;font-size:12px}
         .ms-btn-ghost{background:transparent;color:rgba(255,255,255,.4);border-color:rgba(255,255,255,.15)}
         .ms-btn-ghost:hover{color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.35)}
 
@@ -1252,22 +1274,17 @@
             font-family: inherit;
             box-sizing: border-box;
             transition: background 0.1s ease, border-color 0.1s ease;
-            /* Overrides the OS appearance styling engine entirely */
             appearance: none;
             -webkit-appearance: none;
             -moz-appearance: none;
-
-            /* Custom clean native-looking chevron accent arrow */
             background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: right 8px center;
             background-size: 9px;
         }
 
-        /* Targets dropdown option lists directly to eliminate forced system gray colors */
         .ms-select option {
             background-color: #221c1c;
-            /* Deep dark palette matching osu cards */
             color: #fff;
             padding: 6px;
             font-weight: 500;
@@ -1278,11 +1295,10 @@
             border-color: rgba(255, 255, 255, 0.18);
         }
 
-        /* Specific sizing optimization to make the top menu element smaller */
         .ms-m-pick.ms-select-sm {
             font-size: 11px;
             padding: 2px 20px 2px 8px;
-            height: 22px; /* Shrunk down layout height */
+            height: 22px;
             background-position: right 6px center;
             background-size: 8px;
             vertical-align: middle;
@@ -1296,17 +1312,17 @@
         .ms-input{background:rgba(0,0,0,.25);border:1px solid rgba(255,255,255,.1);border-radius:4px;color:#eee;padding:4px 8px;font-size:11px;width:260px;max-width:100%}
         .ms-input:focus{outline:none;border-color:rgba(255,255,255,.28)}
 
-        /* --- TOP PANEL SPECIFIC SKELETON ELEMENTS --- */
-       .ms-skeleton-top-body {
+        /* --- TOP PANEL SKELETON --- */
+        .ms-skeleton-top-body {
             display: flex;
             flex-direction: column;
-            gap: 8px; /* Matches the exact gap of the real .ms-top-body */
+            gap: 8px;
             animation: ms-pulse 1.5s infinite ease-in-out;
         }
         .ms-skeleton-top-line {
             background: rgba(255, 255, 255, 0.05);
             border-radius: 4px;
-            height: 18px; /* Taller line to mimic text + button height */
+            height: 18px;
         }
 
         /* --- SKELETON LOADER ANIMATION --- */
@@ -1355,7 +1371,7 @@
             height: 14px;
         }
 
-        /* --- EXPORT BUTTON HITBOX FIXES --- */
+        /* --- LINK / ICON BUTTONS --- */
         .ms-link-btn{display:inline-block;background:none;border:none;color:#88c0d0;cursor:pointer;font-size:11px;padding:0;text-decoration:underline;width:max-content}
         .ms-link-btn:hover{color:#b0d8ec}
         .ms-icon-btn{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:#88c0d0;cursor:pointer;font-size:11px;padding:3px 8px;border-radius:4px;transition:all 0.1s ease;display:inline-flex;align-items:center}

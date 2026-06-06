@@ -94,6 +94,56 @@ def _to_out(entry: FeedbackEntry, identity: Optional[UserIdentity]) -> FeedbackO
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+@router.get("/{discussion_id}/count")
+def get_feedback_count(
+    discussion_id: int,
+    mentorship_id: int,
+    mentee_osu_id: Optional[int] = None,
+    current_user:  CurrentUser   = Depends(get_current_user),
+    db:            Session       = Depends(get_db),
+):
+    """Return the number of feedback entries visible to the caller for this discussion."""
+    member = _require_member(db, mentorship_id, current_user.osu_user_id)
+
+    discussion = (
+        db.query(BeatmapDiscussion)
+        .filter(BeatmapDiscussion.osu_discussion_id == discussion_id)
+        .first()
+    )
+    if not discussion:
+        return {"count": 0}
+
+    is_reviewed = (
+        _session_is_reviewed(db, discussion.beatmapset_id, mentorship_id, mentee_osu_id)
+        if mentee_osu_id is not None
+        else discussion.is_discussed
+    )
+
+    rows = (
+        db.query(FeedbackEntry)
+        .filter(
+            FeedbackEntry.discussion_id == discussion_id,
+            or_(
+                FeedbackEntry.mentorship_id == mentorship_id,
+                FeedbackEntry.is_global     == True,
+            )
+        )
+        .all()
+    )
+
+    count = 0
+    for entry in rows:
+        if (not entry.is_global
+                and member.role == UserRole.mentee
+                and not is_reviewed
+                and entry.visibility != Visibility.immediate
+                and entry.author_osu_id != current_user.osu_user_id):
+            continue
+        count += 1
+
+    return {"count": count}
+
+
 @router.get("/{discussion_id}", response_model=List[FeedbackOut])
 def get_feedback(
     discussion_id: int,
@@ -172,7 +222,7 @@ def post_feedback(
     is_mentor    = member.role in (UserRole.mentor, UserRole.lead_mentor)
     visibility   = body.visibility
     is_anonymous = body.is_anonymous if is_mentor else False
-    # Global posts are always immediate — the review gate doesn't apply
+    # Global posts are always immediate — the review gate does not apply
     if body.is_global:
         visibility = Visibility.immediate
 
