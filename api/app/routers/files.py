@@ -100,13 +100,9 @@ def _require_member(db: Session, mentorship_id: int, osu_user_id: int) -> Mentor
 
 
 def _store_bytes(data: bytes, original_filename: str) -> tuple[str, str]:
-    raw_ext = Path(original_filename).suffix.lower()
-    if raw_ext.startswith("."):
-        raw_ext = raw_ext[1:]
-    safe_ext = "".join(ch for ch in raw_ext if ch.isalnum())[:10]
-    ext = f".{safe_ext}" if safe_ext else ".osz"
-
-    stored_name = f"{uuid.uuid4().hex}{ext}"
+    # Use only server-generated filenames for filesystem paths.
+    # Keep a fixed trusted extension to avoid any user influence on path construction.
+    stored_name = f"{uuid.uuid4().hex}.osz"
     full_path = (OSZ_STORAGE_DIR / stored_name).resolve()
     storage_root = OSZ_STORAGE_DIR.resolve()
     if full_path.parent != storage_root:
