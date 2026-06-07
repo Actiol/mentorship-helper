@@ -244,6 +244,44 @@ def _validate_allowed_source_url(url: str) -> None:
     _validate_public_http_url(url)
 
 
+def _build_pinned_fetch_target(url: str) -> tuple[str, str]:
+    _validate_allowed_source_url(url)
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    try:
+        addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise HTTPException(400, "Failed to resolve URL host")
+
+    public_ip = None
+    for info in addr_infos:
+        candidate_ip = info[4][0]
+        try:
+            ip_obj = ipaddress.ip_address(candidate_ip)
+        except ValueError:
+            continue
+        if not (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        ):
+            public_ip = candidate_ip
+            break
+
+    if not public_ip:
+        raise HTTPException(400, "URL host did not resolve to a public IP")
+
+    netloc = f"[{public_ip}]:{port}" if ":" in public_ip else f"{public_ip}:{port}"
+    safe_url = parsed._replace(netloc=netloc).geturl()
+    host_header = host if parsed.port is None else f"{host}:{parsed.port}"
+    return safe_url, host_header
+
+
 @router.post("/beatmapset/from-url", response_model=FileOut)
 async def upload_osz_from_url(
     mentorship_id:   int                   = Form(...),
@@ -263,8 +301,8 @@ async def upload_osz_from_url(
             current_url = url
             max_redirects = 5
             for _ in range(max_redirects + 1):
-                _validate_allowed_source_url(current_url)
-                resp = await client.get(current_url)
+                safe_url, host_header = _build_pinned_fetch_target(current_url)
+                resp = await client.get(safe_url, headers={"Host": host_header})
 
                 if resp.is_redirect:
                     location = resp.headers.get("location")
