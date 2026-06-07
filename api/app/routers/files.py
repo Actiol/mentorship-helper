@@ -239,10 +239,25 @@ async def upload_osz_from_url(
 
     _validate_public_http_url(url)
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
+    async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
         try:
-            resp = await client.get(url)
-            resp.raise_for_status()
+            current_url = url
+            max_redirects = 5
+            for _ in range(max_redirects + 1):
+                _validate_public_http_url(current_url)
+                resp = await client.get(current_url)
+
+                if resp.is_redirect:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise HTTPException(400, "Redirect response missing Location header")
+                    current_url = str(httpx.URL(current_url).join(location))
+                    continue
+
+                resp.raise_for_status()
+                break
+            else:
+                raise HTTPException(400, "Too many redirects")
         except httpx.HTTPError as e:
             raise HTTPException(400, f"Failed to fetch URL: {e}")
 
