@@ -129,7 +129,12 @@
 
     const getBsid    = () => { const m = location.pathname.match(/\/beatmapsets\/(\d+)/); return m ? parseInt(m[1]) : null; };
     const isDiscPage = () => /\/beatmapsets\/\d+\/discussion/.test(location.pathname);
-    const esc        = s  => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const esc        = s  => String(s)
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#39;');
     const avatarUrl  = id => `https://a.ppy.sh/${id}`;
     const roleLabel  = r  => ({ lead_mentor:'Lead Mentor', mentor:'Mentor', mentee:'Mentee' }[r] || r);
 
