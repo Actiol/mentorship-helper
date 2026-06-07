@@ -34,6 +34,12 @@ from ..config import settings
 
 router = APIRouter(prefix="/files", tags=["files"])
 
+ALLOWED_REMOTE_FETCH_HOSTS = {
+    h.strip().lower()
+    for h in getattr(settings, "allowed_remote_fetch_hosts", [])
+    if isinstance(h, str) and h.strip()
+}
+
 OSZ_STORAGE_DIR = Path(os.environ.get("OSZ_STORAGE_DIR", "/data/osz"))
 OSZ_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -225,6 +231,19 @@ async def upload_osz(
     return record
 
 
+def _validate_allowed_source_url(url: str) -> None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise HTTPException(400, "Only http(s) URLs with a valid host are allowed")
+
+    if not ALLOWED_REMOTE_FETCH_HOSTS or host not in ALLOWED_REMOTE_FETCH_HOSTS:
+        raise HTTPException(400, "URL host is not allowed")
+
+    _validate_public_http_url(url)
+
+
 @router.post("/beatmapset/from-url", response_model=FileOut)
 async def upload_osz_from_url(
     mentorship_id:   int                   = Form(...),
@@ -237,14 +256,14 @@ async def upload_osz_from_url(
     actor_osu_id = _resolve_actor(current_user, uploader_osu_id)
     member       = _require_member(db, mentorship_id, actor_osu_id)
 
-    _validate_public_http_url(url)
+    _validate_allowed_source_url(url)
 
     async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
         try:
             current_url = url
             max_redirects = 5
             for _ in range(max_redirects + 1):
-                _validate_public_http_url(current_url)
+                _validate_allowed_source_url(current_url)
                 resp = await client.get(current_url)
 
                 if resp.is_redirect:
