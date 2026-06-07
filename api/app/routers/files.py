@@ -16,6 +16,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+import ipaddress
+import socket
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -150,6 +153,34 @@ def _ensure_session(
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+def _is_public_ip(ip_text: str) -> bool:
+    ip = ipaddress.ip_address(ip_text)
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+def _validate_public_http_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(400, "Only http/https URLs are allowed")
+    if not parsed.hostname:
+        raise HTTPException(400, "URL must include a valid hostname")
+
+    try:
+        addr_infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror:
+        raise HTTPException(400, "Hostname could not be resolved")
+
+    for info in addr_infos:
+        ip_text = info[4][0]
+        if not _is_public_ip(ip_text):
+            raise HTTPException(400, "URL resolves to a non-public IP address")
+
 @router.post("/beatmapset", response_model=FileOut)
 async def upload_osz(
     mentorship_id:   int                   = Form(...),
@@ -196,6 +227,8 @@ async def upload_osz_from_url(
 ):
     actor_osu_id = _resolve_actor(current_user, uploader_osu_id)
     member       = _require_member(db, mentorship_id, actor_osu_id)
+
+    _validate_public_http_url(url)
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
         try:
