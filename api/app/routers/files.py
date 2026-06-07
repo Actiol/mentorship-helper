@@ -94,9 +94,18 @@ def _require_member(db: Session, mentorship_id: int, osu_user_id: int) -> Mentor
 
 
 def _store_bytes(data: bytes, original_filename: str) -> tuple[str, str]:
-    ext         = Path(original_filename).suffix or ".osz"
+    raw_ext = Path(original_filename).suffix.lower()
+    if raw_ext.startswith("."):
+        raw_ext = raw_ext[1:]
+    safe_ext = "".join(ch for ch in raw_ext if ch.isalnum())[:10]
+    ext = f".{safe_ext}" if safe_ext else ".osz"
+
     stored_name = f"{uuid.uuid4().hex}{ext}"
-    full_path   = OSZ_STORAGE_DIR / stored_name
+    full_path = (OSZ_STORAGE_DIR / stored_name).resolve()
+    storage_root = OSZ_STORAGE_DIR.resolve()
+    if full_path.parent != storage_root:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
     full_path.write_bytes(data)
     return stored_name, str(full_path)
 
