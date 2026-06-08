@@ -1,13 +1,17 @@
 """
-.osz file management.
+.osz file management — two submission modes:
 
-Upload:   POST /files/beatmapset          (multipart, from web or bot)
-          POST /files/beatmapset/from-url (URL fetch, from web or bot)
-Download: GET  /files/beatmapset/{id}/download
+  1. File upload  (POST /files/beatmapset)
+     The .osz is stored on the server and served for download via the extension.
+     Discord bot: pass as a multipart attachment.
+
+  2. URL submission  (POST /files/beatmapset/url)
+     Only the URL string is stored; no file is fetched or downloaded.
+     The extension renders it as a plain hyperlink.
+     Discord bot or web form: pass the URL as a form field.
+
+Download: GET  /files/beatmapset/{id}/download  (file-upload submissions only)
 Info:     GET  /files/beatmapset/{id}/info
-
-When a mentee uploads, a BeatmapsetSession row is auto-created so the
-reviewed-status panel has something to track against.
 """
 
 import enum
@@ -16,11 +20,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-import ipaddress
-import socket
 from urllib.parse import urlparse
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -30,15 +31,8 @@ from sqlalchemy.orm import Session
 from shared.database import get_db
 from shared.models import Base, MentorshipMember, UserRole, BeatmapsetSession
 from ..dependencies import get_current_user, get_current_user_or_bot, CurrentUser
-from ..config import settings
 
 router = APIRouter(prefix="/files", tags=["files"])
-
-ALLOWED_REMOTE_FETCH_HOSTS = {
-    h.strip().lower()
-    for h in getattr(settings, "allowed_remote_fetch_hosts", [])
-    if isinstance(h, str) and h.strip()
-}
 
 OSZ_STORAGE_DIR = Path(os.environ.get("OSZ_STORAGE_DIR", "/data/osz"))
 OSZ_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,8 +43,8 @@ MAX_UPLOAD_BYTES = 150 * 1024 * 1024  # 150 MB
 # ── Model ──────────────────────────────────────────────────────────────────────
 
 class FileSource(str, enum.Enum):
-    discord_upload = "discord_upload"
-    url            = "url"
+    discord_upload = "discord_upload"   # .osz stored on backend
+    url            = "url"              # URL stored, no file downloaded
 
 
 class BeatmapsetFile(Base):
@@ -60,8 +54,12 @@ class BeatmapsetFile(Base):
     mentorship_id       = Column(Integer, nullable=False, index=True)
     beatmapset_id       = Column(Integer, nullable=False, index=True)
     filename            = Column(String, nullable=False)
-    file_path           = Column(String, nullable=False)
-    file_size_bytes     = Column(Integer, nullable=False)
+    # NULL for URL submissions; relative path on disk for file uploads
+    file_path           = Column(String, nullable=True)
+    # NULL for URL submissions
+    file_size_bytes     = Column(Integer, nullable=True)
+    # NULL for file uploads; the submitted URL for URL submissions
+    source_url          = Column(String, nullable=True)
     uploaded_by_osu_id  = Column(Integer, nullable=False)
     uploaded_at         = Column(DateTime, default=datetime.utcnow, nullable=False)
     source              = Column(SAEnum(FileSource), nullable=False)
@@ -74,7 +72,8 @@ class FileOut(BaseModel):
     mentorship_id:      int
     beatmapset_id:      int
     filename:           str
-    file_size_bytes:    int
+    file_size_bytes:    Optional[int]   # None for URL submissions
+    source_url:         Optional[str]   # None for file uploads
     uploaded_by_osu_id: int
     uploaded_at:        datetime
     source:             FileSource
@@ -100,19 +99,17 @@ def _require_member(db: Session, mentorship_id: int, osu_user_id: int) -> Mentor
 
 
 def _store_bytes(data: bytes, original_filename: str) -> tuple[str, str]:
-    # Use only server-generated filenames for filesystem paths.
-    # Keep a fixed trusted extension to avoid any user influence on path construction.
+    """Write bytes to a UUID-named file; returns (stored_name, full_path)."""
     stored_name = f"{uuid.uuid4().hex}.osz"
-    full_path = (OSZ_STORAGE_DIR / stored_name).resolve()
-    storage_root = OSZ_STORAGE_DIR.resolve()
-    if full_path.parent != storage_root:
+    full_path   = (OSZ_STORAGE_DIR / stored_name).resolve()
+    if full_path.parent != OSZ_STORAGE_DIR.resolve():
         raise HTTPException(status_code=400, detail="Invalid file path")
-
     full_path.write_bytes(data)
     return stored_name, str(full_path)
 
 
 def _replace_existing(db: Session, mentorship_id: int, beatmapset_id: int) -> None:
+    """Delete any existing submission for this (mentorship, beatmapset) pair."""
     existing = (
         db.query(BeatmapsetFile)
         .filter(
@@ -122,7 +119,8 @@ def _replace_existing(db: Session, mentorship_id: int, beatmapset_id: int) -> No
         .first()
     )
     if existing:
-        (OSZ_STORAGE_DIR / existing.file_path).unlink(missing_ok=True)
+        if existing.file_path:          # Only remove disk file for file-upload submissions
+            (OSZ_STORAGE_DIR / existing.file_path).unlink(missing_ok=True)
         db.delete(existing)
         db.flush()
 
@@ -142,7 +140,7 @@ def _ensure_session(
     actor_osu_id: int,
     member: MentorshipMember,
 ) -> None:
-    """Create a BeatmapsetSession for a mentee upload if one doesn't exist yet."""
+    """Auto-create a BeatmapsetSession row for mentee submissions."""
     if member.role != UserRole.mentee:
         return
     exists = (
@@ -164,34 +162,6 @@ def _ensure_session(
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
-def _is_public_ip(ip_text: str) -> bool:
-    ip = ipaddress.ip_address(ip_text)
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-def _validate_public_http_url(url: str) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise HTTPException(400, "Only http/https URLs are allowed")
-    if not parsed.hostname:
-        raise HTTPException(400, "URL must include a valid hostname")
-
-    try:
-        addr_infos = socket.getaddrinfo(parsed.hostname, None)
-    except socket.gaierror:
-        raise HTTPException(400, "Hostname could not be resolved")
-
-    for info in addr_infos:
-        ip_text = info[4][0]
-        if not _is_public_ip(ip_text):
-            raise HTTPException(400, "URL resolves to a non-public IP address")
-
 @router.post("/beatmapset", response_model=FileOut)
 async def upload_osz(
     mentorship_id:   int                   = Form(...),
@@ -201,6 +171,7 @@ async def upload_osz(
     current_user:    Optional[CurrentUser] = Depends(get_current_user_or_bot),
     db:              Session               = Depends(get_db),
 ):
+    """Upload an .osz file. Stored on the server; the extension serves it as a download."""
     actor_osu_id = _resolve_actor(current_user, uploader_osu_id)
     member       = _require_member(db, mentorship_id, actor_osu_id)
 
@@ -217,6 +188,7 @@ async def upload_osz(
         filename=file.filename or f"{beatmapset_id}.osz",
         file_path=stored_name,
         file_size_bytes=len(data),
+        source_url=None,
         uploaded_by_osu_id=actor_osu_id,
         source=FileSource.discord_upload,
     )
@@ -227,59 +199,8 @@ async def upload_osz(
     return record
 
 
-def _validate_allowed_source_url(url: str) -> None:
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-
-    if parsed.scheme not in {"http", "https"} or not host:
-        raise HTTPException(400, "Only http(s) URLs with a valid host are allowed")
-
-    if not ALLOWED_REMOTE_FETCH_HOSTS or host not in ALLOWED_REMOTE_FETCH_HOSTS:
-        raise HTTPException(400, "URL host is not allowed")
-
-    _validate_public_http_url(url)
-
-
-def _build_pinned_fetch_target(url: str) -> tuple[str, str]:
-    _validate_allowed_source_url(url)
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-
-    try:
-        addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        raise HTTPException(400, "Failed to resolve URL host")
-
-    public_ip = None
-    for info in addr_infos:
-        candidate_ip = info[4][0]
-        try:
-            ip_obj = ipaddress.ip_address(candidate_ip)
-        except ValueError:
-            continue
-        if not (
-            ip_obj.is_private
-            or ip_obj.is_loopback
-            or ip_obj.is_link_local
-            or ip_obj.is_multicast
-            or ip_obj.is_reserved
-            or ip_obj.is_unspecified
-        ):
-            public_ip = candidate_ip
-            break
-
-    if not public_ip:
-        raise HTTPException(400, "URL host did not resolve to a public IP")
-
-    netloc = f"[{public_ip}]:{port}" if ":" in public_ip else f"{public_ip}:{port}"
-    safe_url = parsed._replace(netloc=netloc).geturl()
-    host_header = host if parsed.port is None else f"{host}:{parsed.port}"
-    return safe_url, host_header
-
-
-@router.post("/beatmapset/from-url", response_model=FileOut)
-async def upload_osz_from_url(
+@router.post("/beatmapset/url", response_model=FileOut)
+async def submit_osz_url(
     mentorship_id:   int                   = Form(...),
     beatmapset_id:   int                   = Form(...),
     url:             str                   = Form(...),
@@ -287,50 +208,30 @@ async def upload_osz_from_url(
     current_user:    Optional[CurrentUser] = Depends(get_current_user_or_bot),
     db:              Session               = Depends(get_db),
 ):
+    """
+    Store a direct download URL for the beatmapset.
+    The URL is saved as-is — no file is fetched or stored.
+    The extension renders it as a plain hyperlink.
+    """
     actor_osu_id = _resolve_actor(current_user, uploader_osu_id)
     member       = _require_member(db, mentorship_id, actor_osu_id)
 
-    _validate_allowed_source_url(url)
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(400, "URL must be a valid http(s) URL with a hostname")
 
-    async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
-        try:
-            current_url = url
-            max_redirects = 5
-            for _ in range(max_redirects + 1):
-                safe_url, host_header = _build_pinned_fetch_target(current_url)
-                resp = await client.get(safe_url, headers={"Host": host_header})
-
-                if resp.is_redirect:
-                    location = resp.headers.get("location")
-                    if not location:
-                        raise HTTPException(400, "Redirect response missing Location header")
-                    current_url = str(httpx.URL(current_url).join(location))
-                    continue
-
-                resp.raise_for_status()
-                break
-            else:
-                raise HTTPException(400, "Too many redirects")
-        except httpx.HTTPError as e:
-            raise HTTPException(400, f"Failed to fetch URL: {e}")
-
-    data = resp.content
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "Remote file exceeds size limit")
-
-    original_filename = url.rstrip("/").split("/")[-1] or f"{beatmapset_id}.osz"
-    if not original_filename.endswith(".osz"):
-        original_filename += ".osz"
+    # Use the last path segment as a display filename (best-effort)
+    filename = url.rstrip("/").split("/")[-1] or f"{beatmapset_id}.osz"
 
     _replace_existing(db, mentorship_id, beatmapset_id)
-    stored_name, _ = _store_bytes(data, original_filename)
 
     record = BeatmapsetFile(
         mentorship_id=mentorship_id,
         beatmapset_id=beatmapset_id,
-        filename=original_filename,
-        file_path=stored_name,
-        file_size_bytes=len(data),
+        filename=filename,
+        file_path=None,
+        file_size_bytes=None,
+        source_url=url,
         uploaded_by_osu_id=actor_osu_id,
         source=FileSource.url,
     )
@@ -369,6 +270,7 @@ def download_osz(
     """
     Validates JWT + membership, then issues X-Accel-Redirect so nginx
     serves the file directly without streaming through Python.
+    Only works for file-upload submissions — URL submissions have no server-side file.
     nginx must have:
         location /internal/osz/ { internal; alias /data/osz/; }
     """
@@ -382,7 +284,9 @@ def download_osz(
         .first()
     )
     if not record:
-        raise HTTPException(404, "No .osz file uploaded for this beatmapset yet")
+        raise HTTPException(404, "No .osz submitted for this beatmapset yet")
+    if not record.file_path:
+        raise HTTPException(400, "This beatmapset uses a URL submission — use the link directly")
 
     return Response(
         headers={

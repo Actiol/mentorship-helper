@@ -51,9 +51,12 @@ class Mentorship(Base):
     creator_discord_id      = Column(String, nullable=True)
     notification_channel_id = Column(String, nullable=True)
     created_at              = Column(DateTime, default=datetime.utcnow, nullable=False)
-    members     = relationship("MentorshipMember",  back_populates="mentorship", cascade="all, delete-orphan")
-    discussions = relationship("BeatmapDiscussion", back_populates="mentorship", cascade="all, delete-orphan")
-    sessions    = relationship("BeatmapsetSession", back_populates="mentorship", cascade="all, delete-orphan")
+    members  = relationship("MentorshipMember",  back_populates="mentorship", cascade="all, delete-orphan")
+    # passive_deletes=True: let the DB handle SET NULL on BeatmapDiscussion.mentorship_id
+    # rather than having SQLAlchemy load and delete rows (which would cascade to ALL
+    # feedback entries regardless of which mentorship they belong to).
+    discussions = relationship("BeatmapDiscussion", back_populates="mentorship", passive_deletes=True)
+    sessions    = relationship("BeatmapsetSession",  back_populates="mentorship", cascade="all, delete-orphan")
 
 
 class MentorshipMember(Base):
@@ -88,14 +91,23 @@ class BeatmapsetSession(Base):
 class BeatmapDiscussion(Base):
     """
     One row per osu! discussion post (NOT per mentorship).
-    mentorship_id is the first mentorship that referenced this discussion — it is NOT
-    a per-mentorship tracker.  All per-mentorship scoping happens in FeedbackEntry.
+
+    mentorship_id is the first mentorship that referenced this discussion.
+    It is NOT a per-mentorship tracker — all per-mentorship scoping happens
+    in FeedbackEntry.  The FK is ON DELETE SET NULL so that deleting one
+    mentorship does not destroy feedback entries belonging to others.
     """
     __tablename__ = "beatmap_discussions"
     osu_discussion_id   = Column(Integer, primary_key=True)
     beatmapset_id       = Column(Integer, nullable=False, index=True)
-    mentorship_id       = Column(Integer, ForeignKey("mentorships.id", ondelete="CASCADE"), nullable=False, index=True)
-    is_discussed        = Column(Boolean, default=False, nullable=False)  # legacy
+    # Nullable + SET NULL so this row outlives its original mentorship
+    mentorship_id       = Column(
+        Integer,
+        ForeignKey("mentorships.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    is_discussed        = Column(Boolean, default=False, nullable=False)  # legacy per-discussion flag
     discussed_at        = Column(DateTime, nullable=True)
     discussed_by_osu_id = Column(Integer, nullable=True)
     created_at          = Column(DateTime, default=datetime.utcnow, nullable=False)
