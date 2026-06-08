@@ -67,6 +67,11 @@ async def _member_mentorship_autocomplete(
 class MapsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.client = httpx.AsyncClient(timeout=60)
+        
+    async def cog_unload(self):
+        await self.client.aclose()
+
 
     @app_commands.command(
         name="submit_map",
@@ -140,7 +145,14 @@ class MapsCog(commands.Cog):
             db.close()
 
         # ── File attachment (takes priority if both provided) ──────────────────
+        success = False
         if attachment:
+            if url:
+                await interaction.followup.send(
+                    "⚠️ Both attachment and URL provided. **Attachment** will be used (URL ignored).",
+                    ephemeral=True
+                )
+            
             if not attachment.filename.endswith(".osz"):
                 await interaction.followup.send(
                     "❌ Attachment must be an `.osz` file.", ephemeral=True
@@ -149,16 +161,18 @@ class MapsCog(commands.Cog):
             if attachment.size > DISCORD_MAX_BYTES:
                 await interaction.followup.send(
                     f"❌ File too large ({attachment.size // 1024 // 1024} MB, max 25 MB). "
-                    "Use the `url` parameter instead.",
+                    "Please upload no-video if possible. Otherwise use the `url` parameter instead.",
                     ephemeral=True,
                 )
                 return
-
+            
             try:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    dl = await client.get(attachment.url)
-                    dl.raise_for_status()
-                    file_bytes = dl.content
+                dl = await self.client.get(attachment.url)
+                dl.raise_for_status()
+                file_bytes = dl.content
+                if len(file_bytes) < 2 or file_bytes[:2] != b'PK':
+                    await interaction.followup.send("❌ Invalid .osz file.", ephemeral=True)
+                    return
             except httpx.HTTPError as e:
                 await interaction.followup.send(
                     f"❌ Failed to download attachment from Discord: {e}", ephemeral=True
@@ -172,15 +186,21 @@ class MapsCog(commands.Cog):
 
         # ── URL-only submission ────────────────────────────────────────────────
         else:
+            if not (url.startswith("http://") or url.startswith("https://")):
+                await interaction.followup.send("❌ URL must be a valid http/https link.", ephemeral=True)
+                return
             success = await self._submit_url(
                 interaction, uploader_osu_id, mentorship_id, beatmapset_id, url
             )
 
-        if success and notify_channel:
-            await self._maybe_notify(
-                notify_channel, mentorship_name_str,
-                beatmapset_id, uploader_osu_id,
-            )
+        if success:
+            logger.info(f"User {uploader_osu_id} submitted beatmapset {beatmapset_id} to mentorship {mentorship_id}")
+            if notify_channel:
+                try:
+                    channel_id_int = int(notify_channel)
+                    await self._maybe_notify(channel_id_int, mentorship_name_str, beatmapset_id, uploader_osu_id)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid notification_channel_id: {notify_channel}")
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
@@ -194,17 +214,16 @@ class MapsCog(commands.Cog):
     ) -> bool:
         """Store a URL submission — no file is fetched or downloaded."""
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{settings.api_base_url}/files/beatmapset/url",
-                    data={
-                        "mentorship_id":   str(mentorship_id),
-                        "beatmapset_id":   str(beatmapset_id),
-                        "url":             url,
-                        "uploader_osu_id": str(uploader_osu_id),
-                    },
-                    headers={"X-Bot-Secret": settings.api_bot_secret},
-                )
+            resp = await self.client.post(
+                f"{settings.api_base_url}/files/beatmapset/url",
+                data={
+                    "mentorship_id":   str(mentorship_id),
+                    "beatmapset_id":   str(beatmapset_id),
+                    "url":             url,
+                    "uploader_osu_id": str(uploader_osu_id),
+                },
+                headers={"X-Bot-Secret": settings.api_bot_secret},
+            )
             if resp.status_code == 200:
                 await interaction.followup.send(
                     f"✅ URL submitted for beatmapset `{beatmapset_id}`.\n🔗 {url}",
@@ -230,20 +249,22 @@ class MapsCog(commands.Cog):
     ) -> bool:
         """Upload an .osz file to the API for backend storage and serving."""
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(
-                    f"{settings.api_base_url}/files/beatmapset",
-                    data={
-                        "mentorship_id":   str(mentorship_id),
-                        "beatmapset_id":   str(beatmapset_id),
-                        "uploader_osu_id": str(uploader_osu_id),
-                    },
-                    files={"file": (filename, io.BytesIO(file_bytes), "application/octet-stream")},
-                    headers={"X-Bot-Secret": settings.api_bot_secret},
-                )
+            resp = await self.client.post(
+                f"{settings.api_base_url}/files/beatmapset",
+                data={
+                    "mentorship_id":   str(mentorship_id),
+                    "beatmapset_id":   str(beatmapset_id),
+                    "uploader_osu_id": str(uploader_osu_id),
+                },
+                files={"file": (filename, io.BytesIO(file_bytes), "application/octet-stream")},
+                headers={"X-Bot-Secret": settings.api_bot_secret},
+            )
             if resp.status_code == 200:
-                info = resp.json()
-                mb   = info["file_size_bytes"] / 1024 / 1024
+                try:
+                    info = resp.json()
+                    mb = info["file_size_bytes"] / 1024 / 1024
+                except (KeyError, ValueError):
+                    mb = len(file_bytes) / 1024 / 1024  # fallback
                 await interaction.followup.send(
                     f"✅ Submitted **{filename}** ({mb:.1f} MB) "
                     f"for beatmapset `{beatmapset_id}`.",
@@ -260,13 +281,17 @@ class MapsCog(commands.Cog):
 
     async def _maybe_notify(
         self,
-        channel_id: str,
+        channel_id: int,
         mentorship_name: str,
         beatmapset_id: int,
         uploader_osu_id: int,
     ) -> None:
         """Post a submission embed to the configured notification channel."""
-        channel = self.bot.get_channel(int(channel_id))
+        try:
+            channel = await self.bot.fetch_channel(channel_id)
+        except discord.NotFound:
+            logger.warning(f"Notification channel {channel_id} not found")
+            return
         if not channel:
             logger.warning(f"Notification channel {channel_id} not found or inaccessible")
             return
@@ -282,13 +307,12 @@ class MapsCog(commands.Cog):
 
         summary = None
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    f"{settings.api_base_url}/beatmapset/{beatmapset_id}/discussion-summary",
-                    headers={"X-Bot-Secret": settings.api_bot_secret},
-                )
-                if resp.status_code == 200:
-                    summary = resp.json()
+            resp = await self.client.get(
+                f"{settings.api_base_url}/beatmapset/{beatmapset_id}/discussion-summary",
+                headers={"X-Bot-Secret": settings.api_bot_secret},
+            )
+            if resp.status_code == 200:
+                summary = resp.json()
         except Exception as e:
             logger.warning(f"Couldn't fetch discussion summary: {e}")
 
