@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         osu! Mentorship Helper
 // @namespace    https://mentorship.actiol.dev
-// @version      2.5.3
+// @version      2.6.0
 // @description  Mentorship feedback panels on osu! beatmap discussions — with offline fallback
 // @author       Actiol
 // @match        https://osu.ppy.sh/*
@@ -98,6 +98,12 @@
     let myOsuId            = null;
     let apiOnline          = null;
     let globalMode         = false;
+    // Tracks whether #ms-top-panel has settled on its best available anchor yet.
+    // osu!'s header (mapper card, nomination bar) sometimes renders a beat after
+    // the discussion list does, so the first injectTopPanel() pass can land low;
+    // this lets scan() opportunistically re-home the panel once the real top
+    // anchor shows up, instead of leaving it stuck wherever it first landed.
+    let _topAnchorStable   = false;
 
     // ═════════════════════════════════════════════════════════════════════════
     // API
@@ -156,6 +162,7 @@
 
     async function init() {
         initialized = false;
+        _topAnchorStable = false;
         document.getElementById(TOP_ID)?.remove();
         document.querySelectorAll(`[${ATTR}]`).forEach(el => {
             el.querySelectorAll('.ms-panel').forEach(p => p.remove());
@@ -207,6 +214,7 @@
     function injectTopPanel() {
         if (!isDiscPage()) return;
         document.getElementById(TOP_ID)?.remove();
+        _topAnchorStable = false;
         const panel = document.createElement('div');
         panel.id = TOP_ID;
 
@@ -398,23 +406,73 @@
         _insertTop(panel);
     }
 
-    function _insertTop(panel) {
-        const pos = getPanelPos();
-        if (pos === '2') {
-            const ref = document.querySelector('.beatmap-discussion-new-float');
-            if (ref) { ref.insertAdjacentElement('afterend', panel); return; }
+    // Returns the best current insertion point for the top panel, as
+    // { el, mode } for el.insertAdjacentElement(mode, panel).
+    //
+    // `.page-extra-tabs-before` (the old anchor) no longer exists in osu!'s
+    // current beatmapset-discussion markup, and `.beatmap-discussions-header-bottom`
+    // (mapper card / nomination bar) can render a moment *after* the discussion
+    // list itself, so a single query at injectTopPanel()-time can miss it and
+    // get stuck low on the page. This is re-resolved on demand by
+    // _maybeRepositionTop() rather than only once at injection time.
+    function _resolveTopAnchor() {
+        if (getPanelPos() === '2') {
+            const newFloat = document.querySelector('.beatmap-discussion-new-float');
+            if (newFloat) return { el: newFloat, mode: 'afterend' };
         }
-        const refTab = document.querySelector('.page-extra-tabs-before');
-        if (refTab) {
-            refTab.insertAdjacentElement('beforebegin', panel);
-            return;
-        }
-        const hb = document.querySelector('.beatmap-discussions-header-bottom');
-        const ref = hb?.closest('.osu-page');
-        if (ref) { ref.insertAdjacentElement('afterbegin', panel); return; }
+
+        // Preferred "top" anchor: just under the cover/title banner, above the
+        // mapper card + nomination row.
+        const headerBottom = document.querySelector('.beatmap-discussions-header-bottom');
+        const headerBottomPage = headerBottom?.closest('.osu-page');
+        if (headerBottomPage) return { el: headerBottomPage, mode: 'afterbegin' };
+
+        // Next best: just above the sort/filter toolbar.
+        const toolbar = document.querySelector('.beatmapset-discussions-toolbar');
+        if (toolbar) return { el: toolbar, mode: 'beforebegin' };
+
+        // Last resort before giving up entirely: just above the discussion list.
         const disc = document.querySelector('.beatmap-discussions');
-        if (disc) { disc.insertAdjacentElement('beforebegin', panel); return; }
-        document.body.insertBefore(panel, document.body.firstChild);
+        if (disc) return { el: disc, mode: 'beforebegin' };
+
+        return { el: document.body, mode: 'afterbegin-body' };
+    }
+
+    function _placeAt(panel, { el, mode }) {
+        if (mode === 'afterbegin-body') {
+            document.body.insertBefore(panel, document.body.firstChild);
+        } else {
+            el.insertAdjacentElement(mode, panel);
+        }
+    }
+
+    function _insertTop(panel) {
+        _placeAt(panel, _resolveTopAnchor());
+    }
+
+    // Called from scan() (which already runs on every relevant DOM mutation).
+    // Cheap no-op once the panel has reached its best anchor, so it doesn't
+    // keep re-querying on every osu! tooltip/timeago mutation.
+    function _maybeRepositionTop() {
+        if (_topAnchorStable) return;
+        const panel = document.getElementById(TOP_ID);
+        if (!panel) return;
+
+        const target = _resolveTopAnchor();
+        const already =
+            (target.mode === 'afterbegin'         && target.el.firstElementChild === panel) ||
+            (target.mode === 'beforebegin'         && target.el.previousElementSibling === panel) ||
+            (target.mode === 'afterend'            && target.el.nextElementSibling === panel) ||
+            (target.mode === 'afterbegin-body'     && document.body.firstElementChild === panel);
+
+        if (!already) _placeAt(panel, target);
+
+        // Once we've reached the genuinely best anchor for the current mode,
+        // stop polling — there's nothing better left to wait for.
+        const reachedBest = getPanelPos() === '2'
+            ? !!document.querySelector('.beatmap-discussion-new-float')
+            : !!document.querySelector('.beatmap-discussions-header-bottom');
+        if (reachedBest) _topAnchorStable = true;
     }
 
     function _bindTopCtrls(root) {
@@ -608,21 +666,21 @@
                 `Permalink: https://osu.ppy.sh/beatmapsets/${bsid}/discussion/-/generalAll#/${pid}`,
                 '─'.repeat(50)
             );
-            
+
             const entries = byPost.get(pid).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-            
+
             entries.forEach(e => {
                 const roleStr = roleLabel(e.author_role) || 'Unknown Role';
                 const tagStr = [];
-                
+
                 if (e.is_global) tagStr.push('global');
                 if (e.is_anonymous) tagStr.push('anon');
                 if (e._pending) tagStr.push(`vis: ${e.visibility === 'immediate' ? 'now' : 'hold'}`);
-                
+
                 const tags = tagStr.length ? ` [${tagStr.join(', ')}]` : '';
                 const edited = (e.edit_count > 0 && !e._pending) ? ` (edited ${e.edit_count}×)` : '';
                 const state = e._pending ? '[UNSENT] ' : '';
-                
+
                 lines.push(`  ${state}${roleStr}${tags}${edited}`);
                 lines.push(`  ${fmtDate(e.created_at)}`);
                 lines.push(`  ${e.content}`, '');
@@ -758,6 +816,7 @@
 
     function scan() {
         if (!initialized || !isDiscPage()) return;
+        _maybeRepositionTop();
         const bsid = getBsid();
         if (!bsid) return;
 
