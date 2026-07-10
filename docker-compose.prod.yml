@@ -58,6 +58,9 @@ services:
       - oszdata:/data/osz
     networks:
       - internal
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     expose:
       - "8000"
     healthcheck:
@@ -94,6 +97,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     networks:
       - internal
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     logging:
       driver: json-file
       options:

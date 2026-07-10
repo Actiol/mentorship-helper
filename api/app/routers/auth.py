@@ -19,6 +19,9 @@ _OSU_ME_URL    = "https://osu.ppy.sh/api/v2/me"
 
 STATE_TTL_SECONDS = 600  # 10 minutes
 
+# Increased timeouts for slower networks
+HTTPX_TIMEOUT = httpx.Timeout(30.0, connect=10.0, read=20.0, write=10.0, pool=10.0)
+
 
 def _callback_url() -> str:
     # MUST match the "Application Callback URL" registered in your osu! OAuth app.
@@ -87,24 +90,55 @@ async def oauth_callback(
     flow, token = state.split(":", 1)
 
     # Exchange code for osu! access token
-    async with httpx.AsyncClient() as client:
-        token_resp = await client.post(_OSU_TOKEN_URL, json={
-            "client_id":     settings.osu_client_id,
-            "client_secret": settings.osu_client_secret,
-            "code":          code,
-            "grant_type":    "authorization_code",
-            "redirect_uri":  _callback_url(),
-        })
-        if token_resp.status_code != 200:
-            return HTMLResponse(_error_page("Failed to exchange osu! token. Try again."), status_code=502)
+    try:
+        async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
+            token_resp = await client.post(_OSU_TOKEN_URL, json={
+                "client_id":     settings.osu_client_id,
+                "client_secret": settings.osu_client_secret,
+                "code":          code,
+                "grant_type":    "authorization_code",
+                "redirect_uri":  _callback_url(),
+            })
+            if token_resp.status_code != 200:
+                return HTMLResponse(_error_page("Failed to exchange osu! token. Try again."), status_code=502)
 
-        access_token = token_resp.json()["access_token"]
+            access_token = token_resp.json()["access_token"]
 
-        me_resp = await client.get(_OSU_ME_URL, headers={"Authorization": f"Bearer {access_token}"})
-        if me_resp.status_code != 200:
-            return HTMLResponse(_error_page("Failed to fetch your osu! profile. Try again."), status_code=502)
+            me_resp = await client.get(_OSU_ME_URL, headers={"Authorization": f"Bearer {access_token}"})
+            if me_resp.status_code != 200:
+                return HTMLResponse(_error_page("Failed to fetch your osu! profile. Try again."), status_code=502)
 
-        me = me_resp.json()
+            me = me_resp.json()
+    except httpx.ConnectError as e:
+        return HTMLResponse(
+            _error_page(
+                "Could not reach osu! servers. This usually means:<br/>"
+                "• Your server has no internet access<br/>"
+                "• osu! servers are temporarily unavailable<br/>"
+                "• There's a firewall blocking outbound connections<br/><br/>"
+                f"<small>Error: {type(e).__name__}</small>"
+            ),
+            status_code=503
+        )
+    except httpx.TimeoutException as e:
+        return HTMLResponse(
+            _error_page(
+                "Request to osu! timed out (took >30s). Possible causes:<br/>"
+                "• Slow network connection<br/>"
+                "• osu! servers are slow<br/>"
+                "• Docker container has no internet access<br/><br/>"
+                "<small>Try refreshing this page to retry.</small>"
+            ),
+            status_code=504
+        )
+    except httpx.HTTPError as e:
+        return HTMLResponse(
+            _error_page(
+                f"Network error contacting osu!: {e.__class__.__name__}<br/>"
+                "Please try again or contact support if the issue persists."
+            ),
+            status_code=502
+        )
 
     osu_user_id: int  = me["id"]
     osu_username: str = me["username"]
@@ -184,7 +218,7 @@ async def _discord_dm(discord_id: str, message: str) -> None:
     """Send a DM to a Discord user directly via the bot token (no discord.py needed)."""
     try:
         headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
             dm = await client.post(
                 "https://discord.com/api/v10/users/@me/channels",
                 json={"recipient_id": discord_id},
@@ -215,6 +249,7 @@ _BASE_HTML = """<!DOCTYPE html>
   h2{{font-size:1.4rem;margin-bottom:1rem}}
   p{{line-height:1.6;color:rgba(255,255,255,.7)}}
   code{{background:rgba(255,255,255,.08);padding:2px 6px;border-radius:4px;font-size:.9em}}
+  small{{color:rgba(255,255,255,.4);font-size:.85em}}
   .ok{{color:#4bd28f}} .err{{color:#e94560}}
 </style></head><body><div class="card">{body}</div></body></html>"""
 
